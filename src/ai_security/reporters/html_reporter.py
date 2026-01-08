@@ -1182,6 +1182,21 @@ class HTMLReporter(BaseReporter):
         """Render unified report content."""
         score_class = self._get_score_class(result.overall_score)
 
+        # Extract scores from sub-results
+        static_score = result.static_result.overall_score if result.static_result else None
+        live_score = result.live_result.overall_score if result.live_result else None
+
+        # Calculate total issues from both static findings and live vulnerabilities
+        total_issues = 0
+        if result.static_result:
+            total_issues += len(result.static_result.findings)
+        if result.live_result:
+            total_issues += len(result.live_result.vulnerabilities)
+
+        # Format scores for display
+        static_score_display = f"{static_score:.0f}" if static_score is not None else "N/A"
+        live_score_display = f"{live_score:.0f}" if live_score is not None else "N/A"
+
         content = f"""
         <div class="summary-card">
             <div class="summary-grid">
@@ -1190,15 +1205,15 @@ class HTMLReporter(BaseReporter):
                     <div class="metric-label">Overall Score</div>
                 </div>
                 <div class="metric">
-                    <div class="metric-value">{result.static_score:.0f if result.static_score else 'N/A'}</div>
+                    <div class="metric-value">{static_score_display}</div>
                     <div class="metric-label">Static Score</div>
                 </div>
                 <div class="metric">
-                    <div class="metric-value">{result.live_score:.0f if result.live_score else 'N/A'}</div>
+                    <div class="metric-value">{live_score_display}</div>
                     <div class="metric-label">Live Score</div>
                 </div>
                 <div class="metric">
-                    <div class="metric-value">{result.total_issues}</div>
+                    <div class="metric-value">{total_issues}</div>
                     <div class="metric-label">Total Issues</div>
                 </div>
             </div>
@@ -1221,12 +1236,15 @@ class HTMLReporter(BaseReporter):
             </div>
             """
 
-        if result.recommendations:
+        # Build recommendations from the result's to_dict() which computes them
+        result_dict = result.to_dict()
+        recommendations = result_dict.get("summary", {}).get("recommendations", [])
+        if recommendations:
             content += f"""
             <div class="section">
                 <h2>Recommendations</h2>
                 <ul>
-                    {''.join(f'<li>{html.escape(rec)}</li>' for rec in result.recommendations)}
+                    {''.join(f'<li>{html.escape(rec)}</li>' for rec in recommendations)}
                 </ul>
             </div>
             """
