@@ -49,40 +49,31 @@ ai-security-cli scan ./my_project -o html -f security_report.html
 
 ### High-Level Overview
 
-```mermaid
-flowchart TB
-    subgraph CLI["AI SECURITY CLI"]
-        scan["scan command"]
-        test["test command"]
-    end
-
-    subgraph Static["STATIC ANALYSIS ENGINE"]
-        parser["Python AST Parser"]
-        detectors["10 OWASP Detectors"]
-        scorers["7 Security Scorers"]
-    end
-
-    subgraph Live["LIVE TESTING ENGINE"]
-        providers["7 LLM Providers"]
-        livedet["11 Live Detectors"]
-    end
-
-    subgraph Reports["REPORT GENERATION"]
-        json["JSON"]
-        html["HTML"]
-        sarif["SARIF"]
-        text["TEXT"]
-    end
-
-    scan --> parser
-    parser --> detectors
-    detectors --> scorers
-
-    test --> providers
-    providers --> livedet
-
-    scorers --> Reports
-    livedet --> Reports
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                              AI SECURITY CLI                                     │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│    ┌──────────────────┐                      ┌──────────────────┐               │
+│    │   scan command   │                      │   test command   │               │
+│    └────────┬─────────┘                      └────────┬─────────┘               │
+│             │                                         │                          │
+│             ▼                                         ▼                          │
+│    ┌─────────────────────────────┐          ┌─────────────────────────────┐    │
+│    │   STATIC ANALYSIS ENGINE    │          │    LIVE TESTING ENGINE      │    │
+│    │                             │          │                             │    │
+│    │  • Python AST Parser        │          │  • 7 LLM Providers          │    │
+│    │  • 10 OWASP Detectors       │          │  • 11 Live Detectors        │    │
+│    │  • 7 Security Scorers       │          │  • 4-Factor Confidence      │    │
+│    └──────────────┬──────────────┘          └──────────────┬──────────────┘    │
+│                   │                                         │                    │
+│                   └─────────────────┬───────────────────────┘                    │
+│                                     ▼                                            │
+│                        ┌─────────────────────────┐                              │
+│                        │    REPORT GENERATION    │                              │
+│                        │  JSON | HTML | SARIF    │                              │
+│                        └─────────────────────────┘                              │
+└─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Static Analysis Flow
@@ -134,60 +125,58 @@ flowchart TB
                                               ▼
                             ┌─────────────────────────────────┐
                             │          SCAN RESULT            │
-                            │  ┌───────────┐ ┌─────────────┐  │
-                            │  │ Findings  │ │  Category   │  │
-                            │  │           │ │   Scores    │  │
-                            │  └───────────┘ └─────────────┘  │
-                            │  ┌───────────┐ ┌─────────────┐  │
-                            │  │  Overall  │ │ Confidence  │  │
-                            │  │   Score   │ │             │  │
-                            │  └───────────┘ └─────────────┘  │
+                            │  • Findings    • Category Scores│
+                            │  • Overall Score  • Confidence  │
                             └─────────────────────────────────┘
 ```
 
 ### Live Testing Flow
 
-```mermaid
-flowchart TB
-    subgraph Providers["7 LLM PROVIDERS"]
-        openai["OpenAI"]
-        anthropic["Anthropic"]
-        bedrock["AWS Bedrock"]
-        vertex["Google Vertex"]
-        azure["Azure OpenAI"]
-        ollama["Ollama"]
-        custom["Custom"]
-    end
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                            LIVE TESTING PIPELINE                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
 
-    baseline["BASELINE QUERIES"]
-
-    subgraph LiveDetectors["11 LIVE DETECTORS"]
-        pi["Prompt Injection"]
-        jb["Jailbreak"]
-        dl["Data Leakage"]
-        hal["Hallucination"]
-        dos["DoS"]
-        bias["Bias Detection"]
-    end
-
-    subgraph MoreDetectors["...continued"]
-        me["Model Extraction"]
-        adv["Adversarial"]
-        om["Output Manipulation"]
-        sc["Supply Chain"]
-        ba["Behavioral Anomaly"]
-    end
-
-    subgraph TestResult["TEST RESULT"]
-        vulns["Vulnerabilities"]
-        score["Security Score"]
-    end
-
-    Providers --> baseline
-    baseline --> LiveDetectors
-    baseline --> MoreDetectors
-    LiveDetectors --> TestResult
-    MoreDetectors --> TestResult
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                              7 LLM PROVIDERS                                    │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌───────┐ ┌─────┐│
+│  │ OpenAI  │ │Anthropic│ │ AWS     │ │ Google  │ │  Azure  │ │Ollama │ │Cust-││
+│  │         │ │         │ │ Bedrock │ │ Vertex  │ │ OpenAI  │ │(local)│ │ om  ││
+│  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └───┬───┘ └──┬──┘│
+└───────┴──────────┴──────────┴──────────┴──────────┴─────────┴────────┴──────┘
+                                        │
+                                        ▼
+                          ┌──────────────────────────┐
+                          │    BASELINE QUERIES      │
+                          └────────────┬─────────────┘
+                                       │
+                                       ▼
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                            11 LIVE DETECTORS                                    │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐│
+│  │  Prompt  │ │Jailbreak │ │   Data   │ │ Halluc-  │ │   DoS    │ │   Bias   ││
+│  │Injection │ │          │ │ Leakage  │ │ ination  │ │          │ │Detection ││
+│  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘│
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐            │
+│  │  Model   │ │Adversar- │ │  Output  │ │  Supply  │ │Behavioral│            │
+│  │Extraction│ │   ial    │ │  Manip.  │ │  Chain   │ │ Anomaly  │            │
+│  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘            │
+└───────────────────────────────────────────┬────────────────────────────────────┘
+                                            │
+                                            ▼
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                        4-FACTOR CONFIDENCE CALCULATION                          │
+│                                                                                 │
+│    Response Analysis (30%) + Detector Logic (35%) +                            │
+│    Evidence Quality (25%) + Severity Factor (10%) = Confidence Score           │
+└───────────────────────────────────────────┬────────────────────────────────────┘
+                                            │
+                                            ▼
+                          ┌─────────────────────────────────┐
+                          │          TEST RESULT            │
+                          │  • Vulnerabilities  • Score     │
+                          │  • Tests Passed   • Confidence  │
+                          └─────────────────────────────────┘
 ```
 
 ### Component Architecture
@@ -199,96 +188,32 @@ flowchart TB
 │                                                                                  │
 │  ┌─────────────────────────────────────────────────────────────────────────┐    │
 │  │                           CLI LAYER (cli.py)                             │    │
-│  │                                                                          │    │
 │  │    scan command ─────────────────────────── test command                 │    │
-│  │         │                                        │                       │    │
-│  └─────────┼────────────────────────────────────────┼───────────────────────┘    │
-│            │                                        │                            │
-│            ▼                                        ▼                            │
-│  ┌──────────────────────────┐          ┌──────────────────────────┐             │
-│  │      CORE LAYER          │          │       CORE LAYER         │             │
-│  │                          │          │                          │             │
-│  │  ┌────────────────────┐  │          │  ┌────────────────────┐  │             │
-│  │  │    scanner.py      │  │          │  │     tester.py      │  │             │
-│  │  │ Static Scanner     │  │          │  │   Live Tester      │  │             │
-│  │  └────────────────────┘  │          │  └────────────────────┘  │             │
-│  └────────────┬─────────────┘          └────────────┬─────────────┘             │
-│               │                                     │                            │
-│      ┌────────┴────────┐                   ┌────────┴────────┐                  │
-│      ▼                 ▼                   ▼                 ▼                  │
-│  ┌────────────┐  ┌────────────┐      ┌────────────┐   ┌────────────┐           │
-│  │  STATIC    │  │  SCORERS   │      │   LIVE     │   │ PROVIDERS  │           │
-│  │ DETECTORS  │  │            │      │ DETECTORS  │   │            │           │
-│  ├────────────┤  ├────────────┤      ├────────────┤   ├────────────┤           │
-│  │llm01_promp │  │owasp_score │      │prompt_inje │   │openai_prov │           │
-│  │llm02_insec │  │prompt_secu │      │jailbreak   │   │anthropic_p │           │
-│  │llm03_train │  │model_secur │      │data_leakag │   │bedrock_pro │           │
-│  │llm04_model │  │data_privac │      │hallucinati │   │vertex_prov │           │
-│  │llm05_suppl │  │hallucinati │      │dos         │   │azure_provi │           │
-│  │llm06_secre │  │ethical_ai_ │      │bias        │   │ollama_prov │           │
-│  │llm07_insec │  │governance_ │      │model_extra │   │custom_prov │           │
-│  │llm08_exces │  └────────────┘      │adversarial │   └────────────┘           │
-│  │llm09_overr │                      │output_mani │                             │
-│  │llm10_model │                      │supply_chai │                             │
-│  └────────────┘                      │behavioral_ │                             │
-│                                      └────────────┘                             │
-│                                             │                                    │
-│                                             ▼                                    │
-│                                      ┌────────────┐                             │
-│                                      │  UTILITIES │                             │
-│                                      ├────────────┤                             │
-│                                      │markov_chai │                             │
-│                                      │entropy     │                             │
-│                                      │scoring     │                             │
-│                                      │statistical │                             │
-│                                      └────────────┘                             │
+│  └─────────┬───────────────────────────────────────────┬───────────────────┘    │
+│            │                                           │                         │
+│            ▼                                           ▼                         │
+│  ┌──────────────────────────┐            ┌──────────────────────────┐           │
+│  │      scanner.py          │            │       tester.py          │           │
+│  └────────────┬─────────────┘            └────────────┬─────────────┘           │
+│               │                                       │                          │
+│      ┌────────┴────────┐                    ┌─────────┴─────────┐               │
+│      ▼                 ▼                    ▼                   ▼               │
+│  ┌────────────┐  ┌────────────┐      ┌────────────┐    ┌────────────┐          │
+│  │  STATIC    │  │  SCORERS   │      │   LIVE     │    │ PROVIDERS  │          │
+│  │ DETECTORS  │  │            │      │ DETECTORS  │    │            │          │
+│  │ LLM01-10   │  │ 7 scorers  │      │ 11 detects │    │ 7 providers│          │
+│  └────────────┘  └────────────┘      └────────────┘    └────────────┘          │
 │                                                                                  │
 │  ┌─────────────────────────────────────────────────────────────────────────┐    │
-│  │                          REPORTERS                                       │    │
-│  │   ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐    │    │
-│  │   │base_reporter│  │json_reporter│  │html_reporter│  │sarif_report │    │    │
-│  │   └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘    │    │
+│  │  REPORTERS: base | json | html | sarif                                   │    │
 │  └─────────────────────────────────────────────────────────────────────────┘    │
-│                                                                                  │
 │  ┌─────────────────────────────────────────────────────────────────────────┐    │
-│  │                           MODELS                                         │    │
-│  │   ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                 │    │
-│  │   │  finding.py │    │vulnerability│    │  result.py  │                 │    │
-│  │   │  (Static)   │    │    .py      │    │  (Unified)  │                 │    │
-│  │   └─────────────┘    └─────────────┘    └─────────────┘                 │    │
+│  │  MODELS: finding.py | vulnerability.py | result.py                       │    │
 │  └─────────────────────────────────────────────────────────────────────────┘    │
-│                                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐    │
+│  │  UTILS: markov_chain | entropy | scoring | statistical                   │    │
+│  └─────────────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Security Score Calculation
-
-```mermaid
-flowchart LR
-    subgraph Input["Input"]
-        tests["Tests: 50 run, 45 passed"]
-    end
-
-    subgraph Deductions["Severity Deductions"]
-        sev["CRITICAL: -20 pts\nHIGH: -10 pts\nMEDIUM: -5 pts\nLOW: -2 pts"]
-    end
-
-    subgraph Output["Output"]
-        score["Score: 45/100\nRisk: MEDIUM"]
-    end
-
-    Input --> Deductions
-    Deductions --> Output
-```
-
-### 4-Factor Confidence Calculation
-
-```mermaid
-pie title Confidence Weight Distribution
-    "Response Analysis (30%)" : 30
-    "Detector Logic (35%)" : 35
-    "Evidence Quality (25%)" : 25
-    "Severity Factor (10%)" : 10
 ```
 
 ## CLI Commands
@@ -342,9 +267,6 @@ ai-security-cli scan ./project -o html -f security_report.html
 
 # Scan a GitHub repository directly
 ai-security-cli scan https://github.com/langchain-ai/langchain
-
-# Scan a GitLab repository with HTML report
-ai-security-cli scan https://gitlab.com/user/llm-app -o html -f report.html
 ```
 
 ### Live Model Testing (`test`)
@@ -367,7 +289,6 @@ ai-security-cli test [OPTIONS]
 | `-o, --output` | Output format: text, json, html, sarif | text |
 | `-f, --output-file` | Write output to file | - |
 | `--timeout` | Timeout per test in seconds | 30 |
-| `--parallelism` | Maximum concurrent tests | 5 |
 | `-v, --verbose` | Enable verbose output | false |
 
 **Supported Providers:**
@@ -398,18 +319,6 @@ ai-security-cli test -p openai -m gpt-4 -t prompt-injection -t jailbreak
 
 # Test with Ollama (local)
 ai-security-cli test -p ollama -m llama2 --mode standard
-
-# Generate HTML report
-ai-security-cli test -p openai -m gpt-4 -o html -f test_report.html
-
-# Test with custom endpoint
-ai-security-cli test -p custom -m my-model -e https://api.example.com/v1
-```
-
-### List Available Tests (`list-tests`)
-
-```bash
-ai-security-cli list-tests
 ```
 
 ## OWASP LLM Top 10 Coverage
@@ -418,126 +327,39 @@ ai-security-cli list-tests
 
 | ID | Vulnerability | Description |
 |----|---------------|-------------|
-| LLM01 | Prompt Injection | Detects unsanitized user input in prompts, f-string injection, template vulnerabilities |
-| LLM02 | Insecure Output Handling | Identifies unvalidated LLM output used in sensitive operations |
-| LLM03 | Training Data Poisoning | Finds unsafe data loading, pickle usage, unvalidated training data |
-| LLM04 | Model Denial of Service | Detects missing rate limiting, unbounded loops, no timeout configuration |
-| LLM05 | Supply Chain Vulnerabilities | Identifies unsafe model loading, unverified downloads, dependency risks |
-| LLM06 | Sensitive Information Disclosure | Finds hardcoded secrets, API keys, credentials in code |
-| LLM07 | Insecure Plugin Design | Detects unsafe plugin loading, dynamic code execution |
-| LLM08 | Excessive Agency | Identifies autonomous actions without human oversight |
-| LLM09 | Overreliance | Finds missing output validation, no fact-checking mechanisms |
-| LLM10 | Model Theft | Detects exposed model artifacts, unprotected weights |
+| LLM01 | Prompt Injection | Detects unsanitized user input in prompts |
+| LLM02 | Insecure Output Handling | Identifies unvalidated LLM output |
+| LLM03 | Training Data Poisoning | Finds unsafe data loading |
+| LLM04 | Model Denial of Service | Detects missing rate limiting |
+| LLM05 | Supply Chain Vulnerabilities | Identifies unsafe model loading |
+| LLM06 | Sensitive Information Disclosure | Finds hardcoded secrets |
+| LLM07 | Insecure Plugin Design | Detects unsafe plugin loading |
+| LLM08 | Excessive Agency | Identifies autonomous actions |
+| LLM09 | Overreliance | Finds missing output validation |
+| LLM10 | Model Theft | Detects exposed model artifacts |
 
 ### Live Testing Detectors
 
 | ID | Detector | Description |
 |----|----------|-------------|
-| PI | Prompt Injection | Tests for direct/indirect prompt injection vulnerabilities |
-| JB | Jailbreak | Tests for DAN, roleplay, and instruction bypass attacks |
-| DL | Data Leakage | Tests for PII exposure, system prompt leakage |
-| HAL | Hallucination | Tests for factual accuracy and logical consistency |
-| DOS | Denial of Service | Tests for resource exhaustion vulnerabilities |
-| BIAS | Bias Detection | Tests for demographic bias in responses |
-| ME | Model Extraction | Tests for model architecture/parameter disclosure |
-| ADV | Adversarial Inputs | Tests for unicode, homoglyph, and encoding attacks |
-| OM | Output Manipulation | Tests for response injection and format hijacking |
-| SC | Supply Chain | Tests for unsafe code generation recommendations |
-| BA | Behavioral Anomaly | Tests for unexpected behavioral changes |
-
-## Confidence Scoring
-
-### 4-Factor Confidence Calculation
-
-The live testing engine uses a sophisticated 4-factor confidence calculation:
-
-| Factor | Weight | Description |
-|--------|--------|-------------|
-| Response Analysis | 30% | How clearly the response indicates vulnerability |
-| Detector Logic | 35% | Strength of detection algorithm match |
-| Evidence Quality | 25% | Quality and completeness of evidence |
-| Severity Factor | 10% | Impact factor of the finding |
-
-**Formula:**
-```
-Confidence = (RA × 0.30) + (DL × 0.35) + (EQ × 0.25) + (SF × 0.10)
-```
+| PI | Prompt Injection | Tests for injection vulnerabilities |
+| JB | Jailbreak | Tests for instruction bypass attacks |
+| DL | Data Leakage | Tests for PII exposure |
+| HAL | Hallucination | Tests for factual accuracy |
+| DOS | Denial of Service | Tests for resource exhaustion |
+| BIAS | Bias Detection | Tests for demographic bias |
+| ME | Model Extraction | Tests for architecture disclosure |
+| ADV | Adversarial Inputs | Tests for encoding attacks |
+| OM | Output Manipulation | Tests for response injection |
+| SC | Supply Chain | Tests for unsafe code generation |
+| BA | Behavioral Anomaly | Tests for unexpected behavior |
 
 ## Output Formats
 
-### Text Output
-
-Default human-readable output with rich formatting.
-
-### JSON Output
-
-Machine-readable JSON format for CI/CD integration:
-
-```json
-{
-  "report_type": "static_scan",
-  "generated_at": "2026-01-15T10:30:00Z",
-  "summary": {
-    "target": "./my_project",
-    "files_scanned": 15,
-    "overall_score": 72.5,
-    "confidence": 0.85,
-    "findings_count": 8
-  },
-  "findings": [...],
-  "category_scores": [...]
-}
-```
-
-### HTML Output
-
-Professional HTML reports with embedded styling and interactive features:
-
-- Executive summary with score visualization
-- Severity breakdown charts
-- Detailed findings with code snippets
-- Remediation recommendations
-- Category-wise analysis
-
-**Interactive Filtering:**
-
-- **Filter by Severity** - Click colored chips to show/hide CRITICAL, HIGH, MEDIUM, LOW, INFO findings
-- **Filter by Category** - Toggle OWASP LLM categories (LLM01-LLM10) or detector types
-- **Text Search** - Real-time search across all finding content
-- **Quick Actions** - "All", "None", and "Reset" buttons for fast filtering
-
-### SARIF Output
-
-SARIF (Static Analysis Results Interchange Format) output for CI/CD integration:
-
-```bash
-# Generate SARIF report
-ai-security-cli scan ./project -o sarif -f results.sarif
-```
-
-Compatible with: GitHub Code Scanning, Azure DevOps, VS Code SARIF Viewer, GitLab SAST, SonarQube
-
-## Project Structure
-
-```
-ai-security-cli/
-├── pyproject.toml
-├── README.md
-├── LICENSE
-├── src/
-│   └── ai_security/
-│       ├── cli.py                      # CLI entry point
-│       ├── core/                       # Scanner and Tester
-│       ├── models/                     # Data models
-│       ├── parsers/                    # AST parser
-│       ├── static_detectors/           # 10 OWASP detectors
-│       ├── live_detectors/             # 11 live detectors
-│       ├── providers/                  # 7 LLM providers
-│       ├── scorers/                    # 7 security scorers
-│       ├── reporters/                  # JSON, HTML, SARIF
-│       └── utils/                      # Utilities
-└── tests/
-```
+- **Text**: Human-readable terminal output
+- **JSON**: Machine-readable format for CI/CD
+- **HTML**: Interactive reports with filtering
+- **SARIF**: GitHub Code Scanning, Azure DevOps, VS Code integration
 
 ## Integration
 
@@ -545,9 +367,7 @@ ai-security-cli/
 
 ```yaml
 name: AI Security Scan
-
 on: [push, pull_request]
-
 jobs:
   security-scan:
     runs-on: ubuntu-latest
@@ -566,7 +386,6 @@ jobs:
 ### Pre-commit Hook
 
 ```yaml
-# .pre-commit-config.yaml
 repos:
   - repo: local
     hooks:
@@ -575,7 +394,7 @@ repos:
         entry: ai-security-cli scan
         language: system
         types: [python]
-        args: ['-s', 'high', '-c', '0.8']
+        args: ['-s', 'high']
 ```
 
 ## Development
@@ -591,7 +410,8 @@ pytest tests/ -v --cov=ai_security
 
 MIT License - see [LICENSE](LICENSE) for details.
 
-## Support
+## Links
 
-- Issues: [GitHub Issues](https://github.com/deosha/ai-security-cli/issues)
-- Discussions: [GitHub Discussions](https://github.com/deosha/ai-security-cli/discussions)
+- **GitHub**: https://github.com/deosha/ai-security-cli
+- **PyPI**: https://pypi.org/project/ai-security-cli/
+- **Issues**: https://github.com/deosha/ai-security-cli/issues
