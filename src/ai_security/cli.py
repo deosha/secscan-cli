@@ -84,6 +84,11 @@ def main():
     is_flag=True,
     help="Enable verbose output",
 )
+@click.option(
+    "--audit/--no-audit",
+    default=True,
+    help="Include security posture audit in HTML reports (default: enabled)",
+)
 def scan(
     path: str,
     output: str,
@@ -92,6 +97,7 @@ def scan(
     confidence: float,
     category: tuple,
     verbose: bool,
+    audit: bool,
 ):
     """
     Perform static code analysis for security vulnerabilities.
@@ -117,6 +123,10 @@ def scan(
       - GitLab:    https://gitlab.com/user/repo
       - Bitbucket: https://bitbucket.org/user/repo
 
+    HTML reports include a Security Posture audit tab by default, showing
+    detected security controls and maturity scoring. Use --no-audit to
+    disable this feature.
+
     Examples:
 
     \b
@@ -124,6 +134,7 @@ def scan(
       ai-security-cli scan ./app.py -o json -f report.json
       ai-security-cli scan https://github.com/user/llm-app -o html -f report.html
       ai-security-cli scan ./project --category LLM01 LLM02
+      ai-security-cli scan ./project -o html --no-audit -f vuln-only.html
     """
     setup_logging(verbose)
 
@@ -195,13 +206,60 @@ def scan(
     ]
     result.findings = filtered_findings
 
+    # Run audit if enabled and output is HTML
+    audit_result = None
+    if audit and output == "html":
+        try:
+            from ai_security.audit import AuditEngine
+            from ai_security.core.scanner import clone_repository
+            import shutil
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                task = progress.add_task("Running security audit...", total=None)
+
+                # Determine audit path
+                if is_remote_url(path):
+                    # Clone repo again for audit (scanner may have cleaned up)
+                    temp_dir, success = clone_repository(path)
+                    if success:
+                        audit_path = Path(temp_dir)
+                    else:
+                        audit_path = None
+                        temp_dir = None
+                else:
+                    audit_path = Path(path)
+                    temp_dir = None
+
+                if audit_path and audit_path.exists():
+                    audit_engine = AuditEngine(verbose=verbose)
+                    audit_result = audit_engine.run(audit_path)
+                    progress.update(task, description="Audit complete!")
+
+                # Cleanup temp directory
+                if temp_dir:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+        except ImportError:
+            if verbose:
+                console.print("[dim]Audit module not available, skipping security posture audit[/dim]")
+        except Exception as e:
+            if verbose:
+                console.print(f"[dim]Audit failed: {e}[/dim]")
+
     # Generate output
     if output == "json":
         reporter = JSONReporter(verbose=verbose)
         report = reporter.generate_scan_report(result)
     elif output == "html":
         reporter = HTMLReporter(verbose=verbose)
-        report = reporter.generate_scan_report(result)
+        if audit_result:
+            # Use combined tabbed report
+            report = reporter.generate_scan_with_audit_report(result, audit_result)
+        else:
+            report = reporter.generate_scan_report(result)
     elif output == "sarif":
         reporter = SARIFReporter(verbose=verbose)
         report = reporter.generate_scan_report(result)

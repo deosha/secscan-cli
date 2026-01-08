@@ -2,13 +2,16 @@
 
 A unified command-line tool for AI/LLM security scanning and testing. Combines static code analysis with live model testing to provide comprehensive security assessment for AI applications.
 
+**Website**: [aisentry.co](https://aisentry.co)
+
 ## Features
 
 - **Static Code Analysis**: Scan Python codebases for OWASP LLM Top 10 vulnerabilities
+- **Security Posture Audit**: Auto-detect security controls and generate maturity scores across 6 categories
 - **Live Model Testing**: Test live LLM models for security vulnerabilities via API
 - **Remote Repository Scanning**: Scan GitHub, GitLab, and Bitbucket repositories directly via URL
 - **Multiple Providers**: Support for OpenAI, Anthropic, AWS Bedrock, Google Vertex AI, Azure OpenAI, Ollama, and custom endpoints
-- **Interactive HTML Reports**: Rich reports with real-time filtering by severity, category, and text search
+- **Interactive HTML Reports**: Modern reports with tabbed interface, dark mode, severity filtering, and pagination
 - **SARIF Output**: CI/CD integration with GitHub Code Scanning, Azure DevOps, VS Code, and more
 - **4-Factor Confidence Scoring**: Advanced confidence calculation for accurate vulnerability assessment
 
@@ -37,43 +40,63 @@ ai-security-cli scan ./my_project
 # Static code analysis (remote GitHub repository)
 ai-security-cli scan https://github.com/langchain-ai/langchain
 
+# Generate HTML report with Security Posture audit (default)
+ai-security-cli scan ./my_project -o html -f security_report.html
+
+# Security posture audit only
+ai-security-cli audit ./my_project
+
 # Live model testing
 export OPENAI_API_KEY=sk-...
 ai-security-cli test -p openai -m gpt-4 --mode quick
-
-# Generate HTML report
-ai-security-cli scan ./my_project -o html -f security_report.html
 ```
+
+## HTML Report Features
+
+The HTML reports include a modern, interactive interface:
+
+- **Tabbed Interface**: Switch between Vulnerabilities and Security Posture views
+- **Dark Mode**: Toggle between light and dark themes (persists in browser)
+- **Severity Filtering**: Click severity buttons to filter by Critical, High, Medium, Low
+- **Pagination**: "Show More" button loads items in batches of 10
+- **Combined Scoring**: See both vulnerability score and security posture score
+- **Hover Effects**: Cards and items highlight on hover for better UX
 
 ## Architecture
 
 ### High-Level Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                              AI SECURITY CLI                                     │
-├─────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                  │
-│    ┌──────────────────┐                      ┌──────────────────┐               │
-│    │   scan command   │                      │   test command   │               │
-│    └────────┬─────────┘                      └────────┬─────────┘               │
-│             │                                         │                          │
-│             ▼                                         ▼                          │
-│    ┌─────────────────────────────┐          ┌─────────────────────────────┐    │
-│    │   STATIC ANALYSIS ENGINE    │          │    LIVE TESTING ENGINE      │    │
-│    │                             │          │                             │    │
-│    │  • Python AST Parser        │          │  • 7 LLM Providers          │    │
-│    │  • 10 OWASP Detectors       │          │  • 11 Live Detectors        │    │
-│    │  • 7 Security Scorers       │          │  • 4-Factor Confidence      │    │
-│    └──────────────┬──────────────┘          └──────────────┬──────────────┘    │
-│                   │                                         │                    │
-│                   └─────────────────┬───────────────────────┘                    │
-│                                     ▼                                            │
-│                        ┌─────────────────────────┐                              │
-│                        │    REPORT GENERATION    │                              │
-│                        │  JSON | HTML | SARIF    │                              │
-│                        └─────────────────────────┘                              │
-└─────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────┐
+│                                  AI SECURITY CLI                                      │
+├──────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                       │
+│  ┌────────────────┐    ┌────────────────┐    ┌────────────────┐                      │
+│  │  scan command  │    │ audit command  │    │  test command  │                      │
+│  └───────┬────────┘    └───────┬────────┘    └───────┬────────┘                      │
+│          │                     │                     │                                │
+│          ▼                     ▼                     ▼                                │
+│  ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐                   │
+│  │  STATIC ANALYSIS  │ │  SECURITY AUDIT   │ │   LIVE TESTING    │                   │
+│  │                   │ │                   │ │                   │                   │
+│  │ • AST Parser      │ │ • 35 Controls     │ │ • 7 LLM Providers │                   │
+│  │ • 10 OWASP Detect │ │ • 6 Categories    │ │ • 11 Detectors    │                   │
+│  │ • 7 Scorers       │ │ • Maturity Score  │ │ • 4-Factor Conf.  │                   │
+│  └─────────┬─────────┘ └─────────┬─────────┘ └─────────┬─────────┘                   │
+│            │                     │                     │                              │
+│            └─────────────────────┼─────────────────────┘                              │
+│                                  ▼                                                    │
+│                    ┌──────────────────────────────┐                                  │
+│                    │      REPORT GENERATION       │                                  │
+│                    │  JSON | HTML | SARIF | Text  │                                  │
+│                    │                              │                                  │
+│                    │  HTML Features:              │                                  │
+│                    │  • Tabbed Interface          │                                  │
+│                    │  • Dark Mode Toggle          │                                  │
+│                    │  • Severity Filtering        │                                  │
+│                    │  • Pagination                │                                  │
+│                    └──────────────────────────────┘                                  │
+└──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Static Analysis Flow
@@ -245,6 +268,7 @@ ai-security-cli scan <path> [OPTIONS]
 | `-s, --severity` | Minimum severity: critical, high, medium, low, info | info |
 | `-c, --confidence` | Minimum confidence threshold (0.0-1.0) | 0.7 |
 | `--category` | Filter by OWASP category (LLM01-LLM10) | all |
+| `--audit/--no-audit` | Include security posture audit in HTML reports | true |
 | `-v, --verbose` | Enable verbose output | false |
 
 **Examples:**
@@ -267,6 +291,59 @@ ai-security-cli scan ./project -o html -f security_report.html
 
 # Scan a GitHub repository directly
 ai-security-cli scan https://github.com/langchain-ai/langchain
+
+# Generate HTML without security posture audit
+ai-security-cli scan ./project -o html --no-audit -f vuln-only.html
+```
+
+### Security Posture Audit (`audit`)
+
+Evaluate security controls and maturity level of your codebase. Detects 35 security controls across 6 categories.
+
+```bash
+ai-security-cli audit <path> [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-o, --output` | Output format: text, json, html | text |
+| `-f, --output-file` | Write output to file | - |
+| `-v, --verbose` | Enable verbose output | false |
+
+**Security Control Categories:**
+
+| Category | Controls | Description |
+|----------|----------|-------------|
+| Prompt Security | 6 | Input validation, sanitization, injection prevention |
+| Model Security | 6 | Rate limiting, access controls, model protection |
+| Data Privacy | 6 | PII detection, encryption, data anonymization |
+| OWASP LLM Top 10 | 6 | Coverage of OWASP LLM security controls |
+| Blue Team Operations | 6 | Logging, monitoring, alerting, incident response |
+| Governance | 5 | Compliance, documentation, audit trails |
+
+**Maturity Levels:**
+
+| Level | Score | Description |
+|-------|-------|-------------|
+| Initial | 0-20 | No formal security controls |
+| Developing | 21-40 | Basic controls being implemented |
+| Defined | 41-60 | Documented security processes |
+| Managed | 61-80 | Measured and controlled security |
+| Optimizing | 81-100 | Continuous security improvement |
+
+**Examples:**
+
+```bash
+# Audit a local project
+ai-security-cli audit ./my_project
+
+# Generate HTML audit report
+ai-security-cli audit ./project -o html -f audit-report.html
+
+# Audit a GitHub repository
+ai-security-cli audit https://github.com/user/repo -o json
 ```
 
 ### Live Model Testing (`test`)
@@ -412,6 +489,7 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Links
 
-- **GitHub**: https://github.com/deosha/ai-security-cli
-- **PyPI**: https://pypi.org/project/ai-security-cli/
-- **Issues**: https://github.com/deosha/ai-security-cli/issues
+- **Website**: [aisentry.co](https://aisentry.co)
+- **GitHub**: [github.com/deosha/ai-security-cli](https://github.com/deosha/ai-security-cli)
+- **PyPI**: [pypi.org/project/ai-security-cli](https://pypi.org/project/ai-security-cli/)
+- **Issues**: [Report bugs](https://github.com/deosha/ai-security-cli/issues)
