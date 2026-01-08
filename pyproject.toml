@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-security-cli"
-version = "1.0.0"
+version = "1.0.0b1"
 description = "Unified AI/LLM Security Scanner - Static Code Analysis + Live Model Testing"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -25,11 +25,6 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
-
-[project.urls]
-Homepage = "https://github.com/deosha/ai-security-cli"
-Repository = "https://github.com/deosha/ai-security-cli"
-Issues = "https://github.com/deosha/ai-security-cli/issues"
 
 dependencies = [
     # CLI Framework
@@ -57,6 +52,11 @@ dependencies = [
     "astunparse>=1.6.3; python_version < '3.9'",
     "typing-extensions>=4.0.0; python_version < '3.10'",
 ]
+
+[project.urls]
+Homepage = "https://github.com/deosha/ai-security-cli"
+Repository = "https://github.com/deosha/ai-security-cli"
+Issues = "https://github.com/deosha/ai-security-cli/issues"
 
 [project.optional-dependencies]
 # AWS Bedrock support
