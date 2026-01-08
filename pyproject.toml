@@ -26,6 +26,11 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 
+[project.urls]
+Homepage = "https://github.com/deosha/ai-security-cli"
+Repository = "https://github.com/deosha/ai-security-cli"
+Issues = "https://github.com/deosha/ai-security-cli/issues"
+
 dependencies = [
     # CLI Framework
     "click>=8.0.0",

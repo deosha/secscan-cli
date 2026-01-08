@@ -581,8 +581,8 @@ repos:
 ## Development
 
 ```bash
-git clone https://github.com/deosha/secscan-cli.git
-cd secscan-cli
+git clone https://github.com/deosha/ai-security-cli.git
+cd ai-security-cli
 pip install -e ".[dev]"
 pytest tests/ -v --cov=ai_security
 ```
@@ -593,5 +593,5 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Support
 
-- Issues: [GitHub Issues](https://github.com/deosha/secscan-cli/issues)
-- Discussions: [GitHub Discussions](https://github.com/deosha/secscan-cli/discussions)
+- Issues: [GitHub Issues](https://github.com/deosha/ai-security-cli/issues)
+- Discussions: [GitHub Discussions](https://github.com/deosha/ai-security-cli/discussions)
