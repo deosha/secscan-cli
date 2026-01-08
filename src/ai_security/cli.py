@@ -423,7 +423,7 @@ def list_tests():
 
 
 @main.command()
-@click.argument("path", type=click.Path(exists=True))
+@click.argument("path", type=str)
 @click.option(
     "-o", "--output",
     type=click.Choice(["text", "json", "html"]),
@@ -463,42 +463,90 @@ def audit(
     Unlike 'scan' which finds vulnerabilities, 'audit' evaluates what
     security controls ARE implemented in your codebase.
 
+    PATH can be a local file/directory or a remote Git URL:
+
+    \b
+      - GitHub:    https://github.com/user/repo
+      - GitLab:    https://gitlab.com/user/repo
+      - Bitbucket: https://bitbucket.org/user/repo
+
     Examples:
 
     \b
       ai-security-cli audit ./my-project
       ai-security-cli audit ./my-project -o html -f audit-report.html
-      ai-security-cli audit ./my-project -o json -f audit.json
+      ai-security-cli audit https://github.com/user/repo -o html -f audit.html
     """
     setup_logging(verbose)
 
-    console.print(Panel.fit(
-        "[bold blue]AI Security CLI[/bold blue] - Security Posture Audit",
-        border_style="blue",
-    ))
-
-    # Import audit engine
+    # Import required modules
     from ai_security.audit import AuditEngine
+    from ai_security.core.scanner import is_remote_url, clone_repository
+    import shutil
+
+    # Validate path
+    is_remote = is_remote_url(path)
+    if not is_remote and not Path(path).exists():
+        console.print(f"[red]Error:[/red] Path does not exist: {path}")
+        console.print("\n[dim]For remote repositories, use a full URL:[/dim]")
+        console.print("  - https://github.com/user/repo")
+        console.print("  - https://gitlab.com/user/repo")
+        console.print("  - https://bitbucket.org/user/repo")
+        sys.exit(1)
+
+    # Show appropriate panel
+    if is_remote:
+        console.print(Panel.fit(
+            "[bold blue]AI Security CLI[/bold blue] - Remote Repository Audit",
+            border_style="blue",
+        ))
+        console.print(f"\n[cyan]Repository:[/cyan] {path}")
+    else:
+        console.print(Panel.fit(
+            "[bold blue]AI Security CLI[/bold blue] - Security Posture Audit",
+            border_style="blue",
+        ))
 
     # Initialize engine
     engine = AuditEngine(verbose=verbose)
+    temp_dir = None
 
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
+        # Clone if remote
+        if is_remote:
+            task = progress.add_task("Cloning repository...", total=None)
+            temp_dir, success = clone_repository(path)
+            if not success:
+                console.print(f"[red]Error:[/red] Failed to clone repository")
+                console.print("\n[dim]Make sure git is installed and the repository URL is correct.[/dim]")
+                sys.exit(1)
+            audit_path = Path(temp_dir)
+            progress.update(task, description="Repository cloned!")
+        else:
+            audit_path = Path(path)
+
         task = progress.add_task("Running security audit...", total=None)
 
         try:
-            result = engine.run(Path(path))
+            result = engine.run(audit_path)
             progress.update(task, description="Audit complete!")
         except Exception as e:
             console.print(f"[red]Error during audit:[/red] {e}")
             if verbose:
                 import traceback
                 traceback.print_exc()
+            # Cleanup temp directory
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
             sys.exit(1)
+
+    # Cleanup temp directory
+    if temp_dir:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
     # Generate output
     if output == "json":
