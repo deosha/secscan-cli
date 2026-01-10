@@ -31,13 +31,25 @@ Tested on 10 real-world repos: LangChain, LlamaIndex, vLLM, OpenAI Python, Hayst
 
 - **Static Code Analysis**: Scan Python codebases for OWASP LLM Top 10 vulnerabilities
 - **Security Posture Audit**: Auto-detect security controls and generate maturity scores across 10 categories (61 controls)
-- **Live Model Testing**: Test live LLM models for security vulnerabilities via API
 - **Remote Repository Scanning**: Scan GitHub, GitLab, and Bitbucket repositories directly via URL
-- **Multiple Providers**: Support for OpenAI, Anthropic, AWS Bedrock, Google Vertex AI, Azure OpenAI, Ollama, and custom endpoints
 - **Interactive HTML Reports**: Modern reports with tabbed interface, dark mode, severity filtering, and pagination
 - **SARIF Output**: CI/CD integration with GitHub Code Scanning, Azure DevOps, VS Code, and more
 - **Configurable**: YAML config files, environment variables, per-category thresholds, test file handling
 - **4-Factor Confidence Scoring**: Advanced confidence calculation for accurate vulnerability assessment
+
+## Live Model Testing
+
+For live/runtime testing of LLM models (prompt injection, jailbreaks, etc.), we recommend [Garak](https://github.com/leondz/garak) - a comprehensive LLM vulnerability scanner by NVIDIA.
+
+```bash
+# Install Garak
+pip install garak
+
+# Run probes against a model
+garak --model_type openai --model_name gpt-4 --probes all
+```
+
+AI Security CLI focuses on **static code analysis** - finding vulnerabilities in your source code before deployment. Garak complements this by testing the **runtime behavior** of deployed models.
 
 ## Installation
 
