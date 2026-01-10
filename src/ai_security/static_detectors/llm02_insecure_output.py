@@ -11,12 +11,14 @@ Uses AST-based taint tracking with sink-specific validation:
 - Command sinks: Checks for shell=False, list arguments
 - SQL sinks: Checks for parameterized queries
 - XSS sinks: Checks for HTML escaping
+
+Enhanced with full single-hop taint tracking for eval/exec/SQL/subprocess.
 """
 
 import ast
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ai_security.models.finding import Finding, Severity
 from ai_security.static_detectors.base_detector import BaseDetector
@@ -27,6 +29,10 @@ from ai_security.utils.taint_tracker import (
     TaintFlow,
     SinkType,
     calculate_flow_confidence,
+)
+from ai_security.utils.ast_utils import (
+    names_in_expr,
+    get_full_call_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -93,21 +99,60 @@ class InsecureOutputDetector(BaseDetector):
     }
 
     def _gather_potential_findings(self, parsed_data: Dict[str, Any]) -> List[Finding]:
-        """Find all insecure output handling"""
+        """
+        Find all insecure output handling using AST-based taint tracking.
+
+        Strategy:
+        1. Try AST-based analysis first (preferred - more accurate)
+        2. Fall back to string-based analysis only if AST parsing fails
+        3. Deduplicate findings by (file, line, sink_type)
+        """
         findings = []
+        seen_findings: Set[Tuple[str, int, str]] = set()  # (file, line, sink_type)
 
         llm_calls = parsed_data.get('llm_api_calls', [])
-        assignments = parsed_data.get('assignments', [])
-        functions = parsed_data.get('functions', [])
         source_lines = parsed_data.get('source_lines', [])
+        file_path = parsed_data.get('file_path', 'unknown')
 
         if not llm_calls:
             return findings
 
-        # Try AST-based analysis first for better accuracy
-        ast_findings = self._analyze_with_taint_tracker(parsed_data)
-        if ast_findings:
-            findings.extend(ast_findings)
+        # Try AST-based analysis first (preferred)
+        ast_success = False
+        try:
+            ast_findings = self._analyze_with_taint_tracker(parsed_data)
+            if ast_findings:
+                for finding in ast_findings:
+                    key = (finding.file_path, finding.line_number, finding.evidence.get('sink_type', ''))
+                    if key not in seen_findings:
+                        seen_findings.add(key)
+                        findings.append(finding)
+                ast_success = True
+        except SyntaxError:
+            logger.debug(f"AST parsing failed for {file_path}, using string-based fallback")
+
+        # Fall back to string-based analysis only if AST failed or found nothing
+        if not ast_success:
+            string_findings = self._analyze_with_string_matching(parsed_data)
+            for finding in string_findings:
+                key = (finding.file_path, finding.line_number, finding.evidence.get('sink_type', ''))
+                if key not in seen_findings:
+                    seen_findings.add(key)
+                    findings.append(finding)
+
+        return findings
+
+    def _analyze_with_string_matching(self, parsed_data: Dict[str, Any]) -> List[Finding]:
+        """
+        Fallback string-based analysis when AST parsing fails.
+
+        This is less accurate but works for syntactically invalid Python.
+        """
+        findings = []
+        llm_calls = parsed_data.get('llm_api_calls', [])
+        assignments = parsed_data.get('assignments', [])
+        functions = parsed_data.get('functions', [])
+        source_lines = parsed_data.get('source_lines', [])
 
         # For each LLM call, track where output goes
         for llm_call in llm_calls:
@@ -668,51 +713,68 @@ class InsecureOutputDetector(BaseDetector):
         func_node: ast.FunctionDef,
         source_lines: List[str]
     ) -> List[TaintSource]:
-        """Identify variables that hold LLM output"""
+        """
+        Identify variables that hold LLM output.
+
+        Tracks:
+        1. Direct assignment: response = client.chat.completions.create(...)
+        2. Derived variables: content = response.choices[0].message.content
+        3. Multi-hop: text = content.strip()
+        """
         sources = []
+        source_var_names: Set[str] = set()
 
-        for llm_call in llm_calls:
-            llm_line = llm_call.get('line', 0)
+        # Walk entire function to find all assignments (handles nested blocks)
+        for node in ast.walk(func_node):
+            if not isinstance(node, ast.Assign):
+                continue
+            if not hasattr(node, 'lineno'):
+                continue
 
-            # Check if LLM call is assigned to a variable
-            for stmt in func_node.body:
-                if not isinstance(stmt, ast.Assign):
-                    continue
-                if not hasattr(stmt, 'lineno') or stmt.lineno != llm_line:
-                    continue
-
-                # Found assignment at LLM call line
-                for target in stmt.targets:
-                    if isinstance(target, ast.Name):
-                        sources.append(TaintSource(
-                            var_name=target.id,
-                            line=llm_line,
-                            source_type='llm_output',
-                            node=stmt.value
-                        ))
-
-        # Also check for property access patterns (response.choices[0].message.content)
-        for source in list(sources):
-            # Track derived variables
-            for stmt in func_node.body:
-                if not isinstance(stmt, ast.Assign):
-                    continue
-                if not hasattr(stmt, 'lineno'):
-                    continue
-                if stmt.lineno <= source.line:
-                    continue
-
-                # Check if this assignment references the source
-                for target in stmt.targets:
-                    if isinstance(target, ast.Name):
-                        from ai_security.utils.ast_utils import names_in_expr
-                        if source.var_name in names_in_expr(stmt.value):
+            # Check if this assignment is at an LLM call line
+            for llm_call in llm_calls:
+                llm_line = llm_call.get('line', 0)
+                if node.lineno == llm_line:
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
                             sources.append(TaintSource(
                                 var_name=target.id,
-                                line=stmt.lineno,
-                                source_type='llm_output_derived',
-                                node=stmt.value
+                                line=llm_line,
+                                source_type='llm_output',
+                                node=node.value
                             ))
+                            source_var_names.add(target.id)
+
+        # Track derived variables (response.choices[0].message.content patterns)
+        # Do multiple passes to catch multi-hop derivations
+        for _ in range(3):  # Max 3 hops
+            new_sources = []
+            for node in ast.walk(func_node):
+                if not isinstance(node, ast.Assign):
+                    continue
+                if not hasattr(node, 'lineno'):
+                    continue
+
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        # Skip if already a source
+                        if target.id in source_var_names:
+                            continue
+
+                        # Check if this assignment references any source
+                        referenced_names = names_in_expr(node.value)
+                        if referenced_names & source_var_names:
+                            new_sources.append(TaintSource(
+                                var_name=target.id,
+                                line=node.lineno,
+                                source_type='llm_output_derived',
+                                node=node.value
+                            ))
+                            source_var_names.add(target.id)
+
+            sources.extend(new_sources)
+            if not new_sources:
+                break  # No new sources found, stop iterating
 
         return sources
 
@@ -738,7 +800,6 @@ class InsecureOutputDetector(BaseDetector):
             if not hasattr(node, 'lineno'):
                 continue
 
-            from ai_security.utils.ast_utils import get_full_call_name
             func_name = get_full_call_name(node)
 
             for patterns, sink_type in sink_mappings:
