@@ -9,15 +9,28 @@ Detects when LLM systems are granted excessive permissions or autonomy:
 5. Direct execution of LLM-generated code
 6. Lack of action auditing/logging
 
+Uses AST-based taint tracking to detect:
+- LLM output flowing directly to high-risk operations
+- Missing human-in-the-loop confirmation patterns
+
 References:
 - OWASP LLM08: https://owasp.org/www-project-top-10-for-large-language-model-applications/
 """
 
+import ast
 import logging
 from typing import Any, Dict, List
 
 from ai_security.models.finding import Finding, Severity
 from ai_security.static_detectors.base_detector import BaseDetector
+from ai_security.utils.taint_tracker import (
+    TaintTracker,
+    TaintSource,
+    TaintSink,
+    SinkType,
+    FlowType,
+    calculate_flow_confidence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -227,10 +240,21 @@ class ExcessiveAgencyDetector(BaseDetector):
         source_lines = parsed_data.get('source_lines', [])
         llm_calls = parsed_data.get('llm_api_calls', [])
 
+        # Try AST-based analysis first
+        ast_findings = self._analyze_llm_to_exec_flow(parsed_data)
+        findings.extend(ast_findings)
+
+        # Track functions already detected to avoid duplicates
+        found_funcs = {f.evidence.get('function_name', '').lower() for f in findings}
+
         for func in functions:
             func_name = func.get('name', '')
             func_start = func.get('line', 0)
             func_end = func.get('end_line', func_start + 10)
+
+            # Skip if already found via AST analysis
+            if func_name.lower() in found_funcs:
+                continue
 
             # Get function body
             func_body = '\n'.join(source_lines[func_start-1:func_end])
@@ -288,6 +312,223 @@ class ExcessiveAgencyDetector(BaseDetector):
                 findings.append(finding)
 
         return findings
+
+    def _analyze_llm_to_exec_flow(self, parsed_data: Dict[str, Any]) -> List[Finding]:
+        """
+        Use AST-based taint tracking to find LLM output flowing to exec/eval.
+
+        This provides more accurate detection with:
+        - Proper flow tracking through variables
+        - Sink-specific validation checks
+        - Confidence based on flow type
+        """
+        findings = []
+        source_lines = parsed_data.get('source_lines', [])
+        functions = parsed_data.get('functions', [])
+        llm_calls = parsed_data.get('llm_api_calls', [])
+        file_path = parsed_data.get('file_path', 'unknown')
+
+        if not source_lines or not llm_calls:
+            return findings
+
+        # Parse source to AST
+        source_code = '\n'.join(source_lines)
+        try:
+            tree = ast.parse(source_code)
+        except SyntaxError:
+            return findings
+
+        # Build function node map
+        func_nodes: Dict[str, ast.FunctionDef] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                func_nodes[node.name] = node
+
+        for func in functions:
+            func_name = func['name']
+            func_node = func_nodes.get(func_name)
+            if not func_node:
+                continue
+
+            func_start = func['line']
+            func_end = func.get('end_line', func_start + 100)
+
+            # Find LLM calls in this function
+            func_llm_calls = [
+                call for call in llm_calls
+                if func_start <= call['line'] <= func_end
+            ]
+
+            if not func_llm_calls:
+                continue
+
+            # Initialize taint tracker
+            tracker = TaintTracker(func_node, source_lines)
+
+            # Identify LLM output variables as taint sources
+            sources = self._identify_llm_output_sources(
+                func_llm_calls, func_node
+            )
+
+            if not sources:
+                continue
+
+            # Find execution sinks
+            sinks = self._find_execution_sinks(func_node)
+
+            for sink in sinks:
+                flows = tracker.trace_flows(sources, sink)
+
+                for flow in flows:
+                    # Check for human-in-the-loop patterns
+                    has_hitl = self._check_human_in_the_loop(
+                        func_node, flow.source.line, flow.sink.line
+                    )
+
+                    # Calculate confidence
+                    confidence = calculate_flow_confidence(flow, has_hitl)
+
+                    if confidence < self.confidence_threshold:
+                        continue
+
+                    finding = Finding(
+                        id=f"{self.detector_id}_{file_path}_{flow.sink.line}_exec_taint",
+                        category=f"{self.detector_id}: {self.name}",
+                        severity=Severity.CRITICAL,
+                        confidence=confidence,
+                        title=f"LLM output flows to code execution in '{func_name}'",
+                        description=(
+                            f"In function '{func_name}', LLM output variable "
+                            f"'{flow.source.var_name}' flows to '{flow.sink.func_name}' "
+                            f"on line {flow.sink.line} via {flow.flow_type.value} flow. "
+                            f"This grants excessive agency to the LLM, allowing it to "
+                            f"execute arbitrary code without human oversight."
+                        ),
+                        file_path=file_path,
+                        line_number=flow.sink.line,
+                        code_snippet=self._get_code_snippet(source_lines, flow.sink.line, context=3),
+                        recommendation=self._get_execution_recommendation(),
+                        evidence={
+                            'function_name': func_name,
+                            'source_var': flow.source.var_name,
+                            'execution_type': flow.sink.func_name,
+                            'flow_type': flow.flow_type.value,
+                            'has_human_in_loop': has_hitl,
+                        }
+                    )
+                    findings.append(finding)
+
+        return findings
+
+    def _identify_llm_output_sources(
+        self,
+        llm_calls: List[Dict[str, Any]],
+        func_node: ast.FunctionDef
+    ) -> List[TaintSource]:
+        """Identify variables that hold LLM output"""
+        sources = []
+
+        for llm_call in llm_calls:
+            llm_line = llm_call.get('line', 0)
+
+            # Find assignment at LLM call line
+            for stmt in func_node.body:
+                if not isinstance(stmt, ast.Assign):
+                    continue
+                if not hasattr(stmt, 'lineno') or stmt.lineno != llm_line:
+                    continue
+
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name):
+                        sources.append(TaintSource(
+                            var_name=target.id,
+                            line=llm_line,
+                            source_type='llm_output',
+                            node=stmt.value
+                        ))
+
+        # Track derived variables (response.text, result.content, etc.)
+        for source in list(sources):
+            for stmt in func_node.body:
+                if not isinstance(stmt, ast.Assign):
+                    continue
+                if not hasattr(stmt, 'lineno'):
+                    continue
+                if stmt.lineno <= source.line:
+                    continue
+
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name):
+                        from ai_security.utils.ast_utils import names_in_expr
+                        if source.var_name in names_in_expr(stmt.value):
+                            sources.append(TaintSource(
+                                var_name=target.id,
+                                line=stmt.lineno,
+                                source_type='llm_output_derived',
+                                node=stmt.value
+                            ))
+
+        return sources
+
+    def _find_execution_sinks(self, func_node: ast.FunctionDef) -> List[TaintSink]:
+        """Find exec/eval sinks in function"""
+        sinks = []
+
+        for node in ast.walk(func_node):
+            if not isinstance(node, ast.Call):
+                continue
+            if not hasattr(node, 'lineno'):
+                continue
+
+            from ai_security.utils.ast_utils import get_full_call_name
+            func_name = get_full_call_name(node)
+
+            # Check for execution patterns
+            exec_patterns = ['exec', 'eval', 'compile', 'subprocess', 'os.system']
+            if any(p in func_name.lower() for p in exec_patterns):
+                sinks.append(TaintSink(
+                    func_name=func_name,
+                    line=node.lineno,
+                    sink_type=SinkType.CODE_EXEC,
+                    node=node
+                ))
+
+        return sinks
+
+    def _check_human_in_the_loop(
+        self,
+        func_node: ast.FunctionDef,
+        source_line: int,
+        sink_line: int
+    ) -> bool:
+        """
+        Check if there's a human-in-the-loop confirmation between source and sink.
+
+        Looks for patterns like:
+        - user_approval = input(...)
+        - if confirm(...)
+        - await get_confirmation(...)
+        """
+        hitl_patterns = [
+            'confirm', 'approval', 'approve', 'verify',
+            'human_review', 'human_in_loop', 'manual_check',
+            'input(', 'await_confirmation', 'ask_user'
+        ]
+
+        for stmt in func_node.body:
+            if not hasattr(stmt, 'lineno'):
+                continue
+
+            # Only check between source and sink
+            if not (source_line <= stmt.lineno < sink_line):
+                continue
+
+            stmt_str = ast.dump(stmt).lower()
+            for pattern in hitl_patterns:
+                if pattern in stmt_str:
+                    return True
+
+        return False
 
     def _check_high_risk_operations(self, parsed_data: Dict[str, Any]) -> List[Finding]:
         """Check for high-risk operations without confirmation"""

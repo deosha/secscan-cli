@@ -6,14 +6,29 @@ Detects unsafe usage of LLM outputs in dangerous contexts:
 - Command Injection: Using in shell commands
 - SQL Injection: Building SQL queries
 - Code Execution: eval(), exec(), compile()
+
+Uses AST-based taint tracking with sink-specific validation:
+- Command sinks: Checks for shell=False, list arguments
+- SQL sinks: Checks for parameterized queries
+- XSS sinks: Checks for HTML escaping
 """
 
+import ast
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set
 
 from ai_security.models.finding import Finding, Severity
 from ai_security.static_detectors.base_detector import BaseDetector
+from ai_security.utils.taint_tracker import (
+    TaintTracker,
+    TaintSource,
+    TaintSink,
+    TaintFlow,
+    SinkType,
+    FlowType,
+    calculate_flow_confidence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +104,11 @@ class InsecureOutputDetector(BaseDetector):
 
         if not llm_calls:
             return findings
+
+        # Try AST-based analysis first for better accuracy
+        ast_findings = self._analyze_with_taint_tracker(parsed_data)
+        if ast_findings:
+            findings.extend(ast_findings)
 
         # For each LLM call, track where output goes
         for llm_call in llm_calls:
@@ -534,4 +554,289 @@ class InsecureOutputDetector(BaseDetector):
         if len(output_vars) == 1:
             confidence += 0.1  # Direct flow is clearer
 
-        return min(1.0, confidence)
+        # Use AST-based flow type if available
+        flow_type = evidence.get('flow_type')
+        if flow_type:
+            flow_confidence = {
+                'direct': 0.95,
+                'single_hop': 0.85,
+                'two_hop': 0.75,
+            }
+            if flow_type in flow_confidence:
+                confidence = flow_confidence[flow_type]
+
+        # Reduce confidence if sink-specific validation detected
+        sink_validation = evidence.get('sink_validation')
+        if sink_validation and 'safe' in sink_validation.lower():
+            confidence -= 0.30
+
+        return min(1.0, max(0.0, confidence))
+
+    def _analyze_with_taint_tracker(self, parsed_data: Dict[str, Any]) -> List[Finding]:
+        """
+        Use AST-based TaintTracker for accurate flow analysis.
+
+        This method provides:
+        - Sink-specific validation (shell=False, parameterized SQL)
+        - Sanitization wrapper detection
+        - Proper confidence based on flow type
+        """
+        findings = []
+        source_lines = parsed_data.get('source_lines', [])
+        functions = parsed_data.get('functions', [])
+        llm_calls = parsed_data.get('llm_api_calls', [])
+        file_path = parsed_data.get('file_path', 'unknown')
+
+        if not source_lines or not llm_calls:
+            return findings
+
+        # Parse source to AST
+        source_code = '\n'.join(source_lines)
+        try:
+            tree = ast.parse(source_code)
+        except SyntaxError:
+            return findings  # Fall back to string-based analysis
+
+        # Build function node map
+        func_nodes: Dict[str, ast.FunctionDef] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                func_nodes[node.name] = node
+
+        # For each function, analyze LLM output flows
+        for func in functions:
+            func_name = func['name']
+            func_node = func_nodes.get(func_name)
+            if not func_node:
+                continue
+
+            func_start = func['line']
+            func_end = func.get('end_line', func_start + 100)
+
+            # Find LLM calls in this function
+            func_llm_calls = [
+                call for call in llm_calls
+                if func_start <= call['line'] <= func_end
+            ]
+
+            if not func_llm_calls:
+                continue
+
+            # Initialize taint tracker for this function
+            tracker = TaintTracker(func_node, source_lines)
+
+            # Identify LLM output variables as taint sources
+            sources = self._identify_llm_output_sources(
+                func_llm_calls, func_node, source_lines
+            )
+
+            if not sources:
+                continue
+
+            # Find dangerous sinks in this function
+            sinks = self._identify_dangerous_sinks(func_node, source_lines)
+
+            # Trace flows from sources to sinks
+            for sink in sinks:
+                flows = tracker.trace_flows(sources, sink)
+
+                for flow in flows:
+                    # Check structural validation
+                    has_validation = tracker.check_structural_validation(
+                        flow.source, flow.sink
+                    )
+
+                    # Calculate confidence
+                    confidence = calculate_flow_confidence(flow, has_validation)
+
+                    if confidence < self.confidence_threshold:
+                        continue
+
+                    # Create finding
+                    finding = self._create_ast_finding(
+                        flow=flow,
+                        parsed_data=parsed_data,
+                        func=func,
+                        confidence=confidence
+                    )
+                    findings.append(finding)
+
+        return findings
+
+    def _identify_llm_output_sources(
+        self,
+        llm_calls: List[Dict[str, Any]],
+        func_node: ast.FunctionDef,
+        source_lines: List[str]
+    ) -> List[TaintSource]:
+        """Identify variables that hold LLM output"""
+        sources = []
+
+        for llm_call in llm_calls:
+            llm_line = llm_call.get('line', 0)
+
+            # Check if LLM call is assigned to a variable
+            for stmt in func_node.body:
+                if not isinstance(stmt, ast.Assign):
+                    continue
+                if not hasattr(stmt, 'lineno') or stmt.lineno != llm_line:
+                    continue
+
+                # Found assignment at LLM call line
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name):
+                        sources.append(TaintSource(
+                            var_name=target.id,
+                            line=llm_line,
+                            source_type='llm_output',
+                            node=stmt.value
+                        ))
+
+        # Also check for property access patterns (response.choices[0].message.content)
+        for source in list(sources):
+            # Track derived variables
+            for stmt in func_node.body:
+                if not isinstance(stmt, ast.Assign):
+                    continue
+                if not hasattr(stmt, 'lineno'):
+                    continue
+                if stmt.lineno <= source.line:
+                    continue
+
+                # Check if this assignment references the source
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name):
+                        from ai_security.utils.ast_utils import names_in_expr
+                        if source.var_name in names_in_expr(stmt.value):
+                            sources.append(TaintSource(
+                                var_name=target.id,
+                                line=stmt.lineno,
+                                source_type='llm_output_derived',
+                                node=stmt.value
+                            ))
+
+        return sources
+
+    def _identify_dangerous_sinks(
+        self,
+        func_node: ast.FunctionDef,
+        source_lines: List[str]
+    ) -> List[TaintSink]:
+        """Find dangerous sink calls in function"""
+        sinks = []
+
+        # Sink patterns mapped to SinkType
+        sink_mappings = [
+            (self.COMMAND_SINKS, SinkType.COMMAND),
+            (self.SQL_SINKS, SinkType.SQL),
+            (self.XSS_SINKS, SinkType.XSS),
+            (self.EVAL_SINKS, SinkType.CODE_EXEC),
+        ]
+
+        for node in ast.walk(func_node):
+            if not isinstance(node, ast.Call):
+                continue
+            if not hasattr(node, 'lineno'):
+                continue
+
+            from ai_security.utils.ast_utils import get_full_call_name
+            func_name = get_full_call_name(node)
+
+            for patterns, sink_type in sink_mappings:
+                if any(p.lower() in func_name.lower() for p in patterns):
+                    sinks.append(TaintSink(
+                        func_name=func_name,
+                        line=node.lineno,
+                        sink_type=sink_type,
+                        node=node
+                    ))
+                    break
+
+        return sinks
+
+    def _create_ast_finding(
+        self,
+        flow: TaintFlow,
+        parsed_data: Dict[str, Any],
+        func: Dict[str, Any],
+        confidence: float
+    ) -> Finding:
+        """Create Finding from AST-based taint flow"""
+        file_path = parsed_data.get('file_path', 'unknown')
+        source_lines = parsed_data.get('source_lines', [])
+
+        # Get code snippet
+        snippet_start = max(0, flow.sink.line - 2)
+        snippet_end = min(len(source_lines), flow.sink.line + 2)
+        code_snippet = '\n'.join(source_lines[snippet_start:snippet_end])
+
+        # Map sink type to severity
+        severity_map = {
+            SinkType.XSS: Severity.HIGH,
+            SinkType.COMMAND: Severity.CRITICAL,
+            SinkType.SQL: Severity.CRITICAL,
+            SinkType.CODE_EXEC: Severity.CRITICAL,
+        }
+        severity = severity_map.get(flow.sink.sink_type, Severity.HIGH)
+
+        # Get sink type string for display
+        sink_type_str = flow.sink.sink_type.value
+
+        return Finding(
+            id=f"{self.detector_id}_{file_path}_{flow.sink.line}",
+            category=f"{self.detector_id}: {self.name}",
+            severity=severity,
+            confidence=confidence,
+            title=f"LLM output flows to {sink_type_str} sink",
+            description=(
+                f"LLM output variable '{flow.source.var_name}' flows to "
+                f"'{flow.sink.func_name}' on line {flow.sink.line} via "
+                f"{flow.flow_type.value} flow. "
+                f"This creates a {sink_type_str} vulnerability."
+            ),
+            file_path=file_path,
+            line_number=flow.sink.line,
+            code_snippet=code_snippet,
+            recommendation=self._get_recommendation_for_sink(flow.sink.sink_type),
+            evidence={
+                'sink_type': sink_type_str,
+                'sink_function': flow.sink.func_name,
+                'flow_type': flow.flow_type.value,
+                'output_variables': flow.intermediate_vars,
+                'source_var': flow.source.var_name,
+                'function_name': func['name'],
+                'sink_validation': flow.evidence.get('sink_validation'),
+            }
+        )
+
+    def _get_recommendation_for_sink(self, sink_type: SinkType) -> str:
+        """Get recommendation based on sink type"""
+        recommendations = {
+            SinkType.XSS: (
+                "Mitigations for XSS:\n"
+                "1. Use auto-escaping templates (Jinja2, Django templates)\n"
+                "2. Apply HTML escaping: html.escape(response)\n"
+                "3. Use Content Security Policy (CSP) headers\n"
+                "4. Sanitize with bleach.clean() for rich text"
+            ),
+            SinkType.COMMAND: (
+                "Mitigations for Command Injection:\n"
+                "1. Never pass LLM output to shell commands\n"
+                "2. Use subprocess with shell=False and list arguments\n"
+                "3. Apply allowlist validation for expected values\n"
+                "4. Use shlex.quote() if shell execution is unavoidable"
+            ),
+            SinkType.SQL: (
+                "Mitigations for SQL Injection:\n"
+                "1. Use parameterized queries: cursor.execute(query, (param,))\n"
+                "2. Never concatenate LLM output into SQL\n"
+                "3. Use ORM query builders (SQLAlchemy, Django ORM)"
+            ),
+            SinkType.CODE_EXEC: (
+                "Mitigations for Code Execution:\n"
+                "1. Never pass LLM output to eval() or exec()\n"
+                "2. Use safe alternatives (ast.literal_eval for data)\n"
+                "3. Implement sandboxing if code execution is required"
+            ),
+        }
+        return recommendations.get(sink_type, "Sanitize LLM output before use.")

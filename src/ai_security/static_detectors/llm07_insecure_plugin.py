@@ -9,15 +9,28 @@ Detects security issues in LLM plugin/extension implementations:
 5. Missing plugin sandboxing
 6. Inadequate plugin output validation
 
+Uses AST-based taint tracking for tool function analysis:
+- Tracks LLM output parameters to dangerous sinks
+- Sink-specific validation (shell=False, parameterized SQL, URL allowlists)
+
 References:
 - OWASP LLM07: https://owasp.org/www-project-top-10-for-large-language-model-applications/
 """
 
+import ast
 import logging
 from typing import Any, Dict, List
 
 from ai_security.models.finding import Finding, Severity
 from ai_security.static_detectors.base_detector import BaseDetector
+from ai_security.utils.taint_tracker import (
+    TaintTracker,
+    TaintSource,
+    TaintSink,
+    SinkType,
+    FlowType,
+    calculate_flow_confidence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -476,10 +489,21 @@ class InsecurePluginDetector(BaseDetector):
         functions = parsed_data.get('functions', [])
         source_lines = parsed_data.get('source_lines', [])
 
+        # Try AST-based analysis first
+        ast_findings = self._analyze_tools_with_taint_tracker(parsed_data)
+        findings.extend(ast_findings)
+
+        # Track which functions already have findings to avoid duplicates
+        found_funcs = {f.evidence.get('function_name', '').lower() for f in findings}
+
         for func in functions:
             func_name = func.get('name', '').lower()
             func_start = func.get('line', 0)
             func_end = func.get('end_line', func_start + 30)
+
+            # Skip if already found via AST analysis
+            if func_name in found_funcs:
+                continue
 
             # Check if this looks like a tool function
             is_tool_func = any(pattern in func_name for pattern in self.TOOL_PATTERNS)
@@ -546,6 +570,194 @@ class InsecurePluginDetector(BaseDetector):
                 findings.append(finding)
 
         return findings
+
+    def _analyze_tools_with_taint_tracker(self, parsed_data: Dict[str, Any]) -> List[Finding]:
+        """
+        Use AST-based TaintTracker for accurate tool function analysis.
+
+        Traces LLM output parameters to dangerous sinks with:
+        - Sink-specific validation (shell=False, parameterized SQL)
+        - Proper confidence based on flow type
+        """
+        findings = []
+        source_lines = parsed_data.get('source_lines', [])
+        functions = parsed_data.get('functions', [])
+        file_path = parsed_data.get('file_path', 'unknown')
+
+        if not source_lines:
+            return findings
+
+        # Parse source to AST
+        source_code = '\n'.join(source_lines)
+        try:
+            tree = ast.parse(source_code)
+        except SyntaxError:
+            return findings
+
+        # Build function node map
+        func_nodes: Dict[str, ast.FunctionDef] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                func_nodes[node.name] = node
+
+        # Analyze each tool function
+        for func in functions:
+            func_name = func['name']
+            func_name_lower = func_name.lower()
+
+            # Check if this looks like a tool function
+            is_tool_func = any(pattern in func_name_lower for pattern in self.TOOL_PATTERNS)
+            if not is_tool_func:
+                continue
+
+            func_node = func_nodes.get(func_name)
+            if not func_node:
+                continue
+
+            # Identify LLM output parameters as taint sources
+            sources = self._identify_llm_param_sources(func_node)
+            if not sources:
+                continue
+
+            # Initialize taint tracker
+            tracker = TaintTracker(func_node, source_lines)
+
+            # Find dangerous sinks in this function
+            sinks = self._find_dangerous_sinks(func_node)
+
+            # Trace flows
+            for sink in sinks:
+                flows = tracker.trace_flows(sources, sink)
+
+                for flow in flows:
+                    # Check structural validation
+                    has_validation = tracker.check_structural_validation(
+                        flow.source, flow.sink
+                    )
+
+                    # Calculate confidence
+                    confidence = calculate_flow_confidence(flow, has_validation)
+
+                    if confidence < self.confidence_threshold:
+                        continue
+
+                    # Create finding
+                    finding = self._create_taint_finding(
+                        flow=flow,
+                        parsed_data=parsed_data,
+                        func=func,
+                        confidence=confidence
+                    )
+                    findings.append(finding)
+
+        return findings
+
+    def _identify_llm_param_sources(self, func_node: ast.FunctionDef) -> List[TaintSource]:
+        """Identify function parameters that represent LLM output"""
+        sources = []
+
+        for arg in func_node.args.args:
+            arg_name = arg.arg.lower()
+            if any(pattern in arg_name for pattern in self.LLM_OUTPUT_PARAMS):
+                sources.append(TaintSource(
+                    var_name=arg.arg,
+                    line=func_node.lineno,
+                    source_type='llm_param',
+                    node=arg
+                ))
+
+        return sources
+
+    def _find_dangerous_sinks(self, func_node: ast.FunctionDef) -> List[TaintSink]:
+        """Find dangerous sink calls in function"""
+        sinks = []
+
+        # Map operation types to SinkType
+        sink_type_map = {
+            'shell_exec': SinkType.COMMAND,
+            'sql_exec': SinkType.SQL,
+            'file_access': SinkType.FILE,
+            'http_request': SinkType.HTTP,
+            'code_exec': SinkType.CODE_EXEC,
+        }
+
+        for node in ast.walk(func_node):
+            if not isinstance(node, ast.Call):
+                continue
+            if not hasattr(node, 'lineno'):
+                continue
+
+            from ai_security.utils.ast_utils import get_full_call_name
+            func_name = get_full_call_name(node)
+
+            # Check against dangerous patterns
+            for op_type, patterns in self.DANGEROUS_TOOL_OPS.items():
+                if any(p.lower() in func_name.lower() for p in patterns):
+                    sink_type = sink_type_map.get(op_type, SinkType.PLUGIN)
+                    sinks.append(TaintSink(
+                        func_name=func_name,
+                        line=node.lineno,
+                        sink_type=sink_type,
+                        node=node
+                    ))
+                    break
+
+        return sinks
+
+    def _create_taint_finding(
+        self,
+        flow: 'TaintFlow',
+        parsed_data: Dict[str, Any],
+        func: Dict[str, Any],
+        confidence: float
+    ) -> Finding:
+        """Create Finding from taint flow analysis"""
+        file_path = parsed_data.get('file_path', 'unknown')
+        source_lines = parsed_data.get('source_lines', [])
+
+        # Get code snippet
+        snippet_start = max(0, flow.sink.line - 2)
+        snippet_end = min(len(source_lines), flow.sink.line + 2)
+        code_snippet = '\n'.join(source_lines[snippet_start:snippet_end])
+
+        # Determine severity based on sink type
+        severity_map = {
+            SinkType.COMMAND: Severity.CRITICAL,
+            SinkType.CODE_EXEC: Severity.CRITICAL,
+            SinkType.SQL: Severity.CRITICAL,
+            SinkType.FILE: Severity.HIGH,
+            SinkType.HTTP: Severity.HIGH,
+        }
+        severity = severity_map.get(flow.sink.sink_type, Severity.HIGH)
+
+        sink_type_str = flow.sink.sink_type.value
+
+        return Finding(
+            id=f"{self.detector_id}_{file_path}_{flow.sink.line}_taint",
+            category=f"{self.detector_id}: {self.name}",
+            severity=severity,
+            confidence=confidence,
+            title=f"LLM output flows to {sink_type_str} sink in tool '{func['name']}'",
+            description=(
+                f"In tool function '{func['name']}', LLM output parameter "
+                f"'{flow.source.var_name}' flows to '{flow.sink.func_name}' "
+                f"on line {flow.sink.line} via {flow.flow_type.value} flow. "
+                f"This allows LLM-controlled data to reach a dangerous {sink_type_str} sink."
+            ),
+            file_path=file_path,
+            line_number=flow.sink.line,
+            code_snippet=code_snippet,
+            recommendation=self._get_tool_security_recommendation(),
+            evidence={
+                'function_name': func['name'],
+                'source_var': flow.source.var_name,
+                'sink_function': flow.sink.func_name,
+                'sink_type': sink_type_str,
+                'flow_type': flow.flow_type.value,
+                'detection_type': 'insecure_tool',
+                'sink_validation': flow.evidence.get('sink_validation'),
+            }
+        )
 
     def _get_tool_security_recommendation(self) -> str:
         """Get recommendation for securing LLM tool functions"""
