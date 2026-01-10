@@ -1,12 +1,72 @@
 """Base detector class - all static security detectors inherit from this"""
 
 import logging
+import re
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
-from ai_security.models.finding import Confidence, Finding
+from ai_security.models.finding import Confidence, Finding, Severity
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# NEGATIVE EVIDENCE PATTERNS
+# These patterns indicate the code is likely secure and should reduce confidence
+# =============================================================================
+
+SANITIZATION_PATTERNS: Set[str] = {
+    # HTML/XSS sanitization
+    'html.escape', 'markupsafe', 'bleach.clean', 'bleach.sanitize',
+    'escape(', 'sanitize(', 'cgi.escape', 'django.utils.html.escape',
+    'jinja2.escape', 'nh3.clean',
+
+    # Command/shell sanitization
+    'shlex.quote', 'pipes.quote', 'shell=False',
+
+    # SQL parameterization
+    'parameterized', 'prepared_statement', 'bind_param',
+
+    # URL encoding
+    'urllib.parse.quote', 'urlencode', 'quote_plus',
+}
+
+VALIDATION_PATTERNS: Set[str] = {
+    # Input validation
+    'validate(', 'validator', 'pydantic', 'jsonschema',
+    'schema.validate', 'voluptuous', 'cerberus',
+
+    # Type checking
+    'isinstance(', 'type(', 'typing.',
+
+    # Allowlist/denylist
+    'allowlist', 'whitelist', 'blocklist', 'denylist', 'blacklist',
+
+    # Regex validation
+    're.match', 're.fullmatch', 'regex.match',
+}
+
+SECURITY_CONTROLS: Set[str] = {
+    # Authentication/authorization
+    'requires_auth', '@login_required', '@authenticated',
+    'check_permission', 'has_permission', 'is_authorized',
+
+    # Rate limiting
+    '@ratelimit', '@rate_limit', 'throttle', 'limiter',
+
+    # Human approval
+    'human_review', 'requires_approval', 'human_in_loop',
+    'manual_approval', 'await_confirmation',
+
+    # Verification
+    'verify_signature', 'verify_checksum', 'verify_hash',
+    'check_integrity', 'validate_token',
+}
+
+TEST_FILE_PATTERNS: Set[str] = {
+    'test_', '_test.py', 'tests/', 'testing/', 'spec_',
+    'mock_', 'fixture', 'conftest',
+}
 
 
 class BaseDetector(ABC):
@@ -56,6 +116,11 @@ class BaseDetector(ABC):
         # Gather all potential findings
         all_findings = self._gather_potential_findings(parsed_data)
 
+        # Detect negative evidence at file level
+        source_lines = parsed_data.get('source_lines', [])
+        file_path = parsed_data.get('file_path', '')
+        negative_evidence = self._detect_negative_evidence(source_lines, file_path)
+
         # Filter by confidence threshold
         actionable_findings = []
         uncertain_findings = []
@@ -63,6 +128,12 @@ class BaseDetector(ABC):
         for finding in all_findings:
             # Calculate confidence based on evidence
             confidence = self.calculate_confidence(finding.evidence)
+
+            # Apply negative evidence adjustments
+            confidence = self._apply_negative_evidence(
+                confidence, finding, negative_evidence, source_lines
+            )
+
             finding.confidence = confidence
 
             if confidence >= self.confidence_threshold:
@@ -77,6 +148,103 @@ class BaseDetector(ABC):
             self._log_uncertain_findings(uncertain_findings)
 
         return actionable_findings
+
+    def _detect_negative_evidence(
+        self,
+        source_lines: List[str],
+        file_path: str
+    ) -> Dict[str, Any]:
+        """
+        Detect negative evidence patterns at file level.
+
+        Returns a dictionary indicating which security patterns are present:
+        - has_sanitization: Sanitization functions detected
+        - has_validation: Input validation detected
+        - has_security_controls: Security controls (auth, rate limiting) detected
+        - is_test_file: File appears to be a test file
+        """
+        source_code = '\n'.join(source_lines).lower()
+        file_path_lower = file_path.lower()
+
+        return {
+            'has_sanitization': any(
+                pattern.lower() in source_code for pattern in SANITIZATION_PATTERNS
+            ),
+            'has_validation': any(
+                pattern.lower() in source_code for pattern in VALIDATION_PATTERNS
+            ),
+            'has_security_controls': any(
+                pattern.lower() in source_code for pattern in SECURITY_CONTROLS
+            ),
+            'is_test_file': any(
+                pattern in file_path_lower for pattern in TEST_FILE_PATTERNS
+            ),
+        }
+
+    def _apply_negative_evidence(
+        self,
+        confidence: float,
+        finding: Finding,
+        negative_evidence: Dict[str, Any],
+        source_lines: List[str]
+    ) -> float:
+        """
+        Apply negative evidence to reduce confidence score.
+
+        This is a hook that subclasses can override for domain-specific logic.
+        The base implementation applies common reductions.
+        """
+        original_confidence = confidence
+
+        # Check for sanitization near the finding location
+        finding_context = self._get_finding_context(
+            source_lines, finding.line_number, context_lines=5
+        )
+        context_lower = finding_context.lower()
+
+        # Strong negative evidence in immediate context
+        for pattern in SANITIZATION_PATTERNS:
+            if pattern.lower() in context_lower:
+                confidence -= 0.25
+                break
+
+        # Moderate negative evidence in immediate context
+        for pattern in VALIDATION_PATTERNS:
+            if pattern.lower() in context_lower:
+                confidence -= 0.15
+                break
+
+        # File-level negative evidence (weaker signal)
+        if negative_evidence.get('has_security_controls'):
+            confidence -= 0.10
+
+        # Test files should have lower confidence
+        if negative_evidence.get('is_test_file'):
+            confidence -= 0.20
+
+        # Never go below 0 or above 1
+        confidence = max(0.0, min(1.0, confidence))
+
+        # Log significant demotions for debugging
+        if self.verbose and confidence < original_confidence - 0.1:
+            logger.debug(
+                f"[{self.detector_id}] Confidence reduced "
+                f"{original_confidence:.2f} -> {confidence:.2f} "
+                f"for {finding.title[:40]}..."
+            )
+
+        return confidence
+
+    def _get_finding_context(
+        self,
+        source_lines: List[str],
+        line_num: int,
+        context_lines: int = 5
+    ) -> str:
+        """Get source code context around a finding."""
+        start = max(0, line_num - context_lines - 1)
+        end = min(len(source_lines), line_num + context_lines)
+        return '\n'.join(source_lines[start:end])
 
     @abstractmethod
     def _gather_potential_findings(self, parsed_data: Dict[str, Any]) -> List[Finding]:
