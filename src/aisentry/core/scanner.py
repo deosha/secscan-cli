@@ -208,7 +208,14 @@ class StaticScanner:
         self.owasp_scorer = OWASPScorer(verbose=verbose)
 
     def _init_detectors(self) -> List:
-        """Initialize detectors with per-category thresholds from config."""
+        """
+        Initialize detectors with per-category thresholds from config.
+
+        Special routing:
+        - LLM04 (DoS): Runs in "targeted" mode when explicitly requested,
+          which enables all heuristics. In full-scan mode, only reports
+          high-confidence findings (LLM calls in loops).
+        """
         detector_classes = [
             ('LLM01', PromptInjectionDetector),
             ('LLM02', InsecureOutputDetector),
@@ -222,15 +229,32 @@ class StaticScanner:
             ('LLM10', ModelTheftDetector),
         ]
 
+        # Check if LLM04 or LLM10 is explicitly targeted
+        dos_targeted = bool(
+            self.filter_categories and
+            ('LLM04' in self.filter_categories or 'LLM10' in self.filter_categories)
+        )
+
         detectors = []
         for cat_id, detector_class in detector_classes:
             threshold = self.config.get_threshold(cat_id)
-            detectors.append(
-                detector_class(
-                    verbose=self.verbose,
-                    confidence_threshold=threshold
+
+            # Special handling for ModelDOSDetector
+            if cat_id == 'LLM04':
+                detectors.append(
+                    detector_class(
+                        verbose=self.verbose,
+                        confidence_threshold=threshold,
+                        targeted=dos_targeted
+                    )
                 )
-            )
+            else:
+                detectors.append(
+                    detector_class(
+                        verbose=self.verbose,
+                        confidence_threshold=threshold
+                    )
+                )
 
         return detectors
 

@@ -32,32 +32,76 @@ class PythonASTParser:
         # OpenAI
         'openai.',
         'ChatOpenAI',
+        'AsyncOpenAI',
         # Anthropic
         'anthropic.',
         'ChatAnthropic',
-        'Anthropic',
+        'Anthropic(',
+        'AsyncAnthropic',
+        '.messages.create',   # Anthropic messages API
         # LangChain
         'langchain',
         'llama_index',
-        # Local models / Ollama
-        'ollama',
-        'localhost:11434',  # Default Ollama port
-        'api/generate',     # Ollama API endpoint
-        'api/chat',         # Ollama chat endpoint
+        'ChatVertexAI',
+        'ChatBedrock',
+        # Ollama
+        'ollama.',
+        'Ollama(',
+        'ChatOllama',
+        'localhost:11434',    # Default Ollama port
+        'api/generate',       # Ollama API endpoint
+        'api/chat',           # Ollama chat endpoint
+        # vLLM
+        'vllm.',
+        'LLM(',               # vLLM LLM class
+        'SamplingParams',     # vLLM sampling
+        # Together AI
+        'together.',
+        'Together(',
+        # Mistral
+        'mistralai.',
+        'Mistral(',
+        # Groq
+        'groq.',
+        'Groq(',
+        # Cohere
+        'cohere.',
+        'Cohere(',
+        '.generate(',         # Cohere generate
+        # Replicate
+        'replicate.',
+        'Replicate(',
+        # Hugging Face
+        'transformers.',
+        'pipeline(',
+        'AutoModelForCausalLM',
+        'InferenceClient',
+        # AWS Bedrock
+        'bedrock.',
+        'invoke_model',
+        # Google Vertex AI
+        'vertexai.',
+        'GenerativeModel',
+        'generate_content',
+        # Azure OpenAI
+        'AzureOpenAI',
+        'azure.ai.',
         # Generic LLM patterns
         'llm.',
         'model.',
         '.generate',
         '.complete',
         '.chat',
-        '.invoke',          # LangChain invoke pattern
-        # Fine-tuning API patterns (OpenAI, Anthropic, etc.)
-        '.fine_tuning.',      # client.fine_tuning.jobs.create(...)
-        '.finetune.',         # legacy: openai.FineTune.create(...)
-        'FineTune.',          # openai.FineTune.create(...)
-        '.training.',         # anthropic training APIs
-        '.fine_tune.',        # alternative naming
-        '.tuning.',           # generic tuning patterns
+        '.invoke',            # LangChain invoke pattern
+        '.predict',           # Common LLM method
+        '.run',               # LangChain chains
+        # Fine-tuning API patterns
+        '.fine_tuning.',
+        '.finetune.',
+        'FineTune.',
+        '.training.',
+        '.fine_tune.',
+        '.tuning.',
     ]
 
     def __init__(self, file_path: str):

@@ -151,6 +151,47 @@ def vulnerable():
         findings = detector.detect(parsed)
         assert len(findings) > 0
 
+    def test_detect_helper_function_interprocedural(self, detector):
+        """Test interprocedural detection: helper function returns LLM output."""
+        code = '''
+from openai import OpenAI
+client = OpenAI()
+
+def get_llm_response(prompt):
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.choices[0].message.content
+
+def vulnerable(user_input):
+    llm_output = get_llm_response(user_input)
+    eval(llm_output)  # This should be detected via interprocedural analysis
+'''
+        parsed = parse_code(code)
+        findings = detector.detect(parsed)
+        # Should detect the eval() even though LLM call is in helper function
+        assert len(findings) > 0
+        assert any("LLM02" in f.category for f in findings)
+
+    def test_detect_anthropic_output(self, detector):
+        """Test detection of Anthropic API output in dangerous sink."""
+        code = '''
+import anthropic
+client = anthropic.Anthropic()
+
+def vulnerable():
+    message = client.messages.create(
+        model="claude-3-opus-20240229",
+        messages=[{"role": "user", "content": "Generate code"}]
+    )
+    result = message.content[0].text
+    exec(result)
+'''
+        parsed = parse_code(code)
+        findings = detector.detect(parsed)
+        assert len(findings) > 0
+
 
 class TestModelDOSDetector:
     """Test LLM04 Model DoS Detector."""
@@ -158,6 +199,11 @@ class TestModelDOSDetector:
     @pytest.fixture
     def detector(self):
         return ModelDOSDetector(confidence_threshold=0.5)
+
+    @pytest.fixture
+    def targeted_detector(self):
+        """Detector in targeted mode for full heuristic analysis."""
+        return ModelDOSDetector(confidence_threshold=0.5, targeted=True)
 
     def test_detect_no_rate_limiting(self, detector):
         """Test detection of LLM calls without rate limiting."""
@@ -217,6 +263,67 @@ def rate_limited_call(user_input):
         parsed = parse_code(code)
         findings = detector.detect(parsed)
         assert isinstance(findings, list)
+
+    def test_untargeted_skips_no_rate_limiting(self, detector):
+        """Test that untargeted mode (default) doesn't report missing rate limiting without loop."""
+        code = '''
+from openai import OpenAI
+client = OpenAI()
+
+def simple_function(user_input):
+    # No rate limiting, but also no loop - should be quiet in untargeted mode
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": user_input}]
+    )
+    return response.choices[0].message.content
+'''
+        parsed = parse_code(code)
+        findings = detector.detect(parsed)
+        # In untargeted mode without loop evidence, no findings should be reported
+        assert len(findings) == 0
+
+    def test_targeted_reports_no_rate_limiting(self, targeted_detector):
+        """Test that targeted mode reports missing rate limiting."""
+        code = '''
+from openai import OpenAI
+client = OpenAI()
+
+def simple_function(user_input):
+    # No rate limiting - should be reported in targeted mode
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": user_input}]
+    )
+    return response.choices[0].message.content
+'''
+        parsed = parse_code(code)
+        findings = targeted_detector.detect(parsed)
+        # In targeted mode, should report the missing protections
+        assert len(findings) > 0
+        assert any("LLM04" in f.category for f in findings)
+
+    def test_untargeted_reports_loop_evidence(self, detector):
+        """Test that untargeted mode still reports LLM calls in loops."""
+        code = '''
+from openai import OpenAI
+client = OpenAI()
+
+def batch_process(items):
+    results = []
+    for item in items:
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": item}]
+        )
+        results.append(response.choices[0].message.content)
+    return results
+'''
+        parsed = parse_code(code)
+        findings = detector.detect(parsed)
+        # LLM in loop is high-confidence evidence, should be reported even untargeted
+        assert len(findings) > 0
+        assert any("llm_in_loop" in f.evidence.get('risks', []) for f in findings)
 
 
 class TestSecretsDetector:

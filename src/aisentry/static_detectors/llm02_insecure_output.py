@@ -29,6 +29,7 @@ from aisentry.utils.taint_tracker import (
     TaintFlow,
     SinkType,
     calculate_flow_confidence,
+    InterproceduralAnalyzer,
 )
 from aisentry.utils.ast_utils import (
     names_in_expr,
@@ -624,6 +625,7 @@ class InsecureOutputDetector(BaseDetector):
         - Sink-specific validation (shell=False, parameterized SQL)
         - Sanitization wrapper detection
         - Proper confidence based on flow type
+        - Interprocedural analysis for helper functions that return LLM output
         """
         findings = []
         source_lines = parsed_data.get('source_lines', [])
@@ -631,7 +633,7 @@ class InsecureOutputDetector(BaseDetector):
         llm_calls = parsed_data.get('llm_api_calls', [])
         file_path = parsed_data.get('file_path', 'unknown')
 
-        if not source_lines or not llm_calls:
+        if not source_lines:
             return findings
 
         # Parse source to AST
@@ -647,6 +649,14 @@ class InsecureOutputDetector(BaseDetector):
             if isinstance(node, ast.FunctionDef):
                 func_nodes[node.name] = node
 
+        # Initialize interprocedural analyzer for the entire module
+        # This identifies helper functions that return LLM output
+        interprocedural = InterproceduralAnalyzer(tree, source_lines)
+        llm_output_funcs = interprocedural.get_llm_output_functions()
+
+        if self.verbose and llm_output_funcs:
+            logger.debug(f"[LLM02] Found LLM output helper functions: {llm_output_funcs}")
+
         # For each function, analyze LLM output flows
         for func in functions:
             func_name = func['name']
@@ -657,22 +667,26 @@ class InsecureOutputDetector(BaseDetector):
             func_start = func['line']
             func_end = func.get('end_line', func_start + 100)
 
-            # Find LLM calls in this function
+            # Find direct LLM calls in this function
             func_llm_calls = [
                 call for call in llm_calls
                 if func_start <= call['line'] <= func_end
             ]
 
-            if not func_llm_calls:
-                continue
-
             # Initialize taint tracker for this function
             tracker = TaintTracker(func_node, source_lines)
 
             # Identify LLM output variables as taint sources
-            sources = self._identify_llm_output_sources(
-                func_llm_calls, func_node, source_lines
-            )
+            # Source 1: Direct LLM API calls in this function
+            sources = []
+            if func_llm_calls:
+                sources = self._identify_llm_output_sources(
+                    func_llm_calls, func_node, source_lines
+                )
+
+            # Source 2: Calls to helper functions that return LLM output (interprocedural)
+            helper_sources = interprocedural.get_taint_sources_from_calls(func_node)
+            sources.extend(helper_sources)
 
             if not sources:
                 continue
@@ -692,6 +706,10 @@ class InsecureOutputDetector(BaseDetector):
 
                     # Calculate confidence
                     confidence = calculate_flow_confidence(flow, has_validation)
+
+                    # Slightly reduce confidence for interprocedural flows
+                    if flow.source.source_type == 'llm_helper_function':
+                        confidence -= 0.05
 
                     if confidence < self.confidence_threshold:
                         continue
@@ -801,9 +819,24 @@ class InsecureOutputDetector(BaseDetector):
                 continue
 
             func_name = get_full_call_name(node)
+            func_name_lower = func_name.lower()
 
             for patterns, sink_type in sink_mappings:
-                if any(p.lower() in func_name.lower() for p in patterns):
+                matched = False
+                for p in patterns:
+                    # Strip trailing '(' from pattern for AST matching
+                    # (patterns may have '(' for string-based matching precision)
+                    pattern_clean = p.rstrip('(').lower()
+
+                    # Match if pattern is contained in func_name
+                    # or if func_name ends with the pattern (for bare calls like eval)
+                    if (pattern_clean in func_name_lower or
+                        func_name_lower == pattern_clean or
+                        func_name_lower.endswith('.' + pattern_clean)):
+                        matched = True
+                        break
+
+                if matched:
                     sinks.append(TaintSink(
                         func_name=func_name,
                         line=node.lineno,

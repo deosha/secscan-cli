@@ -10,7 +10,7 @@ Detects vulnerabilities that enable resource exhaustion attacks:
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from aisentry.models.finding import Finding, Severity
 from aisentry.static_detectors.base_detector import BaseDetector
@@ -27,7 +27,14 @@ class ModelDOSDetector(BaseDetector):
     - Missing input length validation
     - Recursive/looping LLM calls
     - No timeout configuration
-    - Unbounded token/context usage
+    - Unbounded context window usage
+
+    Routing Behavior:
+    - When explicitly targeted (LLM04/LLM10 scan): Full heuristic analysis
+    - When running in full scan: Only high-confidence findings (loop evidence)
+
+    This prevents noisy false positives from "no rate limiting" detection
+    when users aren't specifically looking for DoS issues.
     """
 
     detector_id = "LLM04"
@@ -51,17 +58,45 @@ class ModelDOSDetector(BaseDetector):
     }
 
     # Loop indicators (negative - risk)
-    LOOP_PATTERNS = {
-        'while', 'for ', 'loop', 'recursive'
-    }
+    # NOTE: These should match at statement level, not in comments
+    LOOP_KEYWORDS = {'while', 'for'}  # Actual Python loop keywords
+    LOOP_INDICATORS = {'recursive', 'iterate'}  # Supplementary patterns
 
     # Resource limit patterns (positive)
     RESOURCE_LIMIT_PATTERNS = {
         'max_tokens', 'max_length', 'token_limit', 'context_limit'
     }
 
+    def __init__(
+        self,
+        confidence_threshold: Optional[float] = None,
+        verbose: bool = False,
+        targeted: bool = False,
+    ):
+        """
+        Initialize ModelDOSDetector.
+
+        Args:
+            confidence_threshold: Minimum confidence to report findings
+            verbose: Enable verbose logging
+            targeted: If True, run full heuristic analysis. If False,
+                     only report high-confidence findings (loop evidence).
+                     Set to True when user explicitly scans for LLM04.
+        """
+        super().__init__(confidence_threshold=confidence_threshold, verbose=verbose)
+        self.targeted = targeted
+
     def _gather_potential_findings(self, parsed_data: Dict[str, Any]) -> List[Finding]:
-        """Find Model DoS vulnerabilities"""
+        """
+        Find Model DoS vulnerabilities.
+
+        Routing behavior:
+        - When targeted=True: Run all heuristics (rate limiting, timeouts, etc.)
+        - When targeted=False: Only report high-confidence issues (LLM in loops)
+
+        This prevents noisy findings like "no rate limiting" when user hasn't
+        specifically requested DoS detection.
+        """
         findings = []
 
         functions = parsed_data.get('functions', [])
@@ -89,6 +124,15 @@ class ModelDOSDetector(BaseDetector):
             # Check for various DoS risks
             risks = []
 
+            # HIGH CONFIDENCE: LLM calls in loops - always check
+            # This is a clear DoS indicator regardless of targeting
+            has_loop_evidence = self._has_llm_in_loop(
+                func_llm_calls, func_start, func_end, source_lines
+            )
+            if has_loop_evidence:
+                risks.append('llm_in_loop')
+
+            # Always run all heuristics to detect DoS patterns
             # Risk 1: No rate limiting
             if not self._has_rate_limiting(func_start, func_end, source_lines):
                 risks.append('no_rate_limiting')
@@ -97,20 +141,28 @@ class ModelDOSDetector(BaseDetector):
             if not self._has_length_validation(func, func_start, func_end, source_lines):
                 risks.append('no_length_validation')
 
-            # Risk 3: LLM calls in loops
-            if self._has_llm_in_loop(func_llm_calls, func_start, func_end, source_lines):
-                risks.append('llm_in_loop')
-
-            # Risk 4: No timeout configuration
+            # Risk 3: No timeout configuration
             if not self._has_timeout(func_llm_calls, source_lines):
                 risks.append('no_timeout')
 
-            # Risk 5: No token limits
+            # Risk 4: No token limits
             if not self._has_token_limits(func_llm_calls, source_lines):
                 risks.append('no_token_limits')
 
-            # Create findings for identified risks
-            if risks:
+            # Reporting logic:
+            # - When targeted: Report any risks (user explicitly asked for DoS detection)
+            # - When not targeted: Only report if multiple risks OR loop evidence
+            #   This reduces noise from "single missing control" in general scans
+            should_report = False
+            if self.targeted:
+                should_report = len(risks) > 0
+            else:
+                # In general scans, require either:
+                # 1. Loop evidence (high-confidence DoS)
+                # 2. Multiple missing controls (3+ risks indicates systemic issue)
+                should_report = has_loop_evidence or len(risks) >= 3
+
+            if should_report:
                 finding = self._create_dos_finding(
                     func=func,
                     risks=risks,
@@ -172,18 +224,43 @@ class ModelDOSDetector(BaseDetector):
         func_end: int,
         source_lines: List[str]
     ) -> bool:
-        """Check if LLM calls are inside loops"""
+        """
+        Check if LLM calls are inside loops.
+
+        More precise than simple substring matching:
+        - Strips comments before checking
+        - Looks for 'for ' and 'while ' at statement level (after indentation)
+        - Avoids false positives from comments containing loop-related words
+        """
+        import re
+
         for llm_call in llm_calls:
             llm_line = llm_call.get('line', 0)
 
             # Look backwards from LLM call to find loop keywords
             for line_num in range(max(func_start, llm_line - 10), llm_line):
                 if line_num > 0 and line_num <= len(source_lines):
-                    line = source_lines[line_num - 1].lower()
-                    # Check indentation and loop keywords
-                    if any(pattern in line for pattern in self.LOOP_PATTERNS):
-                        # Simple heuristic: if 'while' or 'for' appears before LLM call, likely in loop
-                        return True
+                    line = source_lines[line_num - 1]
+
+                    # Strip comments (after # symbol)
+                    code_part = line.split('#')[0].lower()
+
+                    # Skip if line is empty after stripping comments
+                    if not code_part.strip():
+                        continue
+
+                    # Check for actual loop keywords at statement start
+                    # Pattern: indentation followed by 'for ' or 'while '
+                    stripped = code_part.lstrip()
+                    for keyword in self.LOOP_KEYWORDS:
+                        # Match 'for ' or 'while ' at start of statement
+                        if stripped.startswith(f'{keyword} ') or stripped.startswith(f'{keyword}('):
+                            return True
+
+                    # Check for recursive patterns in function calls/decorators
+                    for indicator in self.LOOP_INDICATORS:
+                        if indicator in code_part:
+                            return True
 
         return False
 

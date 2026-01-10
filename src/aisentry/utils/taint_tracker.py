@@ -682,3 +682,221 @@ def identify_sink_type(func_name: str) -> Optional[SinkType]:
                 return sink_type
 
     return None
+
+
+# =============================================================================
+# INTERPROCEDURAL ANALYSIS
+# =============================================================================
+
+# LLM API patterns to identify LLM calls
+LLM_API_PATTERNS = {
+    # OpenAI
+    'openai', 'chatcompletion', 'chat.completions.create', 'completions.create',
+    # Anthropic
+    'anthropic', 'messages.create', 'claude',
+    # LangChain
+    'langchain', 'llm.invoke', 'chain.invoke', 'chain.run',
+    # Ollama
+    'ollama', 'chat', 'generate',
+    # Generic
+    'llm.', 'model.generate', 'model.complete',
+}
+
+# Patterns indicating LLM output extraction
+LLM_OUTPUT_PATTERNS = {
+    '.choices[', '.message.content', '.content', '.text',
+    '.completion', '.output', '.response',
+}
+
+
+class InterproceduralAnalyzer:
+    """
+    Analyze module-level function relationships for interprocedural taint tracking.
+
+    Identifies:
+    1. Functions that return LLM output (directly or via intermediate vars)
+    2. Functions that wrap LLM calls
+    3. Helper functions that pass through tainted data
+    """
+
+    def __init__(self, tree: ast.Module, source_lines: List[str]):
+        """
+        Initialize interprocedural analyzer.
+
+        Args:
+            tree: AST of the entire module
+            source_lines: Source code lines
+        """
+        self.tree = tree
+        self.source_lines = source_lines
+
+        # Cache of functions that return LLM output
+        self._llm_output_functions: Set[str] = set()
+        # Cache of all function definitions
+        self._function_defs: Dict[str, ast.FunctionDef] = {}
+
+        self._build_function_cache()
+        self._analyze_llm_output_functions()
+
+    def _build_function_cache(self) -> None:
+        """Build cache of all function definitions in module."""
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.FunctionDef):
+                self._function_defs[node.name] = node
+            elif isinstance(node, ast.AsyncFunctionDef):
+                self._function_defs[node.name] = node
+
+    def _analyze_llm_output_functions(self) -> None:
+        """
+        Identify functions that return LLM output.
+
+        A function returns LLM output if:
+        1. It contains an LLM API call AND
+        2. It returns a value derived from that call
+        """
+        for func_name, func_node in self._function_defs.items():
+            if self._function_returns_llm_output(func_node):
+                self._llm_output_functions.add(func_name)
+
+    def _function_returns_llm_output(self, func_node: ast.FunctionDef) -> bool:
+        """
+        Check if a function returns LLM output.
+
+        Tracks:
+        1. Direct return of LLM call result
+        2. Return of variable assigned from LLM call
+        3. Return of derived variable (e.g., response.choices[0].message.content)
+        """
+        # Find all LLM-related assignments in function
+        llm_vars = self._find_llm_output_vars(func_node)
+
+        if not llm_vars:
+            return False
+
+        # Check if any return statement uses these variables
+        for node in ast.walk(func_node):
+            if isinstance(node, ast.Return) and node.value is not None:
+                returned_vars = names_in_expr(node.value)
+                if returned_vars & llm_vars:
+                    return True
+
+                # Also check if return contains LLM output pattern directly
+                return_str = self._node_to_source(node.value)
+                if any(pattern in return_str.lower() for pattern in LLM_OUTPUT_PATTERNS):
+                    # Check if a tainted var is in the expression
+                    if returned_vars & llm_vars:
+                        return True
+
+        return False
+
+    def _find_llm_output_vars(self, func_node: ast.FunctionDef) -> Set[str]:
+        """
+        Find variables that hold LLM output in a function.
+
+        Returns set of variable names that are tainted with LLM output.
+        """
+        llm_vars: Set[str] = set()
+
+        # First pass: find direct LLM call assignments
+        for node in ast.walk(func_node):
+            if isinstance(node, ast.Assign):
+                value_str = self._node_to_source(node.value)
+
+                # Check if assignment is from LLM API call
+                is_llm_call = any(
+                    pattern in value_str.lower()
+                    for pattern in LLM_API_PATTERNS
+                )
+
+                if is_llm_call:
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            llm_vars.add(target.id)
+
+        # Second pass: track derived variables
+        for _ in range(3):  # Max 3 hops
+            new_vars = set()
+            for node in ast.walk(func_node):
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name) and target.id not in llm_vars:
+                            referenced = names_in_expr(node.value)
+                            if referenced & llm_vars:
+                                new_vars.add(target.id)
+            llm_vars.update(new_vars)
+            if not new_vars:
+                break
+
+        return llm_vars
+
+    def _node_to_source(self, node: ast.AST) -> str:
+        """Convert AST node back to source code string."""
+        try:
+            import sys
+            if sys.version_info >= (3, 9):
+                return ast.unparse(node)
+            else:
+                # Python 3.8 fallback
+                try:
+                    import astunparse
+                    return astunparse.unparse(node)
+                except ImportError:
+                    return ast.dump(node)
+        except Exception:
+            return ast.dump(node)
+
+    def get_llm_output_functions(self) -> Set[str]:
+        """
+        Get set of function names that return LLM output.
+
+        Returns:
+            Set of function names
+        """
+        return self._llm_output_functions.copy()
+
+    def is_llm_output_function(self, func_name: str) -> bool:
+        """
+        Check if a function returns LLM output.
+
+        Args:
+            func_name: Name of the function to check
+
+        Returns:
+            True if function returns LLM output
+        """
+        return func_name in self._llm_output_functions
+
+    def get_taint_sources_from_calls(
+        self,
+        func_node: ast.FunctionDef
+    ) -> List[TaintSource]:
+        """
+        Get taint sources from calls to LLM-output-returning functions.
+
+        For interprocedural analysis: if a function calls another function
+        that returns LLM output, the call result is a taint source.
+
+        Args:
+            func_node: Function AST to analyze
+
+        Returns:
+            List of TaintSource from helper function calls
+        """
+        sources = []
+
+        for node in ast.walk(func_node):
+            if isinstance(node, ast.Assign):
+                # Check if RHS is a call to an LLM output function
+                if isinstance(node.value, ast.Call):
+                    func_name = get_call_name(node.value)
+                    if func_name and self.is_llm_output_function(func_name):
+                        for target in node.targets:
+                            if isinstance(target, ast.Name):
+                                sources.append(TaintSource(
+                                    var_name=target.id,
+                                    line=node.lineno,
+                                    source_type='llm_helper_function',
+                                    node=node.value
+                                ))
+
+        return sources
