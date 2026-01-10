@@ -45,10 +45,17 @@ class InsecureOutputDetector(BaseDetector):
     default_confidence_threshold = 0.6
 
     # Dangerous sinks for LLM output
+    # NOTE: Response/HttpResponse removed - too generic, requires context check
     XSS_SINKS = {
-        'render_template', 'render', 'Response', 'HttpResponse',
+        'render_template', 'render',
         'innerHTML', 'outerHTML', 'document.write', 'html()',
         'dangerouslySetInnerHTML', 'v-html'
+    }
+
+    # Context-sensitive XSS sinks - require mimetype check
+    XSS_SINKS_CONTEXT = {
+        'Response': 'text/html',
+        'HttpResponse': 'text/html',
     }
 
     COMMAND_SINKS = {
@@ -275,6 +282,18 @@ class InsecureOutputDetector(BaseDetector):
                             intermediate_vars=[]
                         )
 
+                # Check context-sensitive XSS sinks (Response with text/html mimetype)
+                for sink, required_context in self.XSS_SINKS_CONTEXT.items():
+                    if sink.lower() in code_block and required_context in code_block:
+                        return OutputFlow(
+                            llm_call_line=llm_line,
+                            llm_function=llm_func_name,
+                            sink_line=i + 1,
+                            sink_type='xss',
+                            sink_function=sink,
+                            intermediate_vars=[]
+                        )
+
                 for sink in self.SQL_SINKS:
                     if sink.lower() in code_block:
                         return OutputFlow(
@@ -368,15 +387,29 @@ class InsecureOutputDetector(BaseDetector):
                 sink_type = 'xss'
                 sink_func = next((p for p in self.XSS_SINKS if p in line), 'render')
 
-            elif any(pattern in line for pattern in self.COMMAND_SINKS):
+            # Check context-sensitive XSS sinks (Response with text/html mimetype)
+            elif not sink_type:
+                for sink, required_context in self.XSS_SINKS_CONTEXT.items():
+                    if sink in line:
+                        # Check if the required context (e.g., text/html) is present
+                        # Look at surrounding lines for mimetype
+                        context_window = '\n'.join(
+                            source_lines[max(0, line_num - 3):min(len(source_lines), line_num + 2)]
+                        )
+                        if required_context in context_window:
+                            sink_type = 'xss'
+                            sink_func = sink
+                            break
+
+            if not sink_type and any(pattern in line for pattern in self.COMMAND_SINKS):
                 sink_type = 'command_injection'
                 sink_func = next((p for p in self.COMMAND_SINKS if p in line), 'subprocess')
 
-            elif any(pattern in line for pattern in self.SQL_SINKS):
+            elif not sink_type and any(pattern in line for pattern in self.SQL_SINKS):
                 sink_type = 'sql_injection'
                 sink_func = next((p for p in self.SQL_SINKS if p in line), 'execute')
 
-            elif any(pattern in line for pattern in self.EVAL_SINKS):
+            elif not sink_type and any(pattern in line for pattern in self.EVAL_SINKS):
                 sink_type = 'code_execution'
                 sink_func = next((p for p in self.EVAL_SINKS if p in line), 'eval')
 

@@ -2,9 +2,22 @@
 LLM09: Overreliance Detector
 
 Detects excessive trust in LLM outputs without proper verification or oversight.
+
+Precision Strategy (v1.1):
+Most LLM09 findings are demoted to INFO (advisory) by default.
+Only escalate to HIGH/CRITICAL when there's a clear ACTION EDGE:
+  - LLM output drives HTTP requests (requests.post, httpx, etc.)
+  - LLM output drives file writes
+  - LLM output drives database modifications
+  - LLM output drives subprocess/command execution
+  - AND no human approval/validation is present
+
+This reduces false positives from word-pattern matching (e.g., functions
+with "payment" in name but no actual payment execution).
 """
 
-from typing import Any, Dict, List
+import re
+from typing import Any, Dict, List, Set
 
 from ai_security.models.finding import Severity
 from ai_security.static_detectors.base_detector import BaseDetector, Finding
@@ -19,6 +32,12 @@ class OverrelianceDetector(BaseDetector):
     2. No human oversight for high-stakes operations
     3. Missing output verification/validation
     4. Automated execution without confidence thresholds
+
+    Severity Strategy:
+    - INFO (advisory): Word-pattern matches without action edges
+    - MEDIUM: Action edge present but with some safeguards
+    - HIGH: Action edge without safeguards
+    - CRITICAL: Direct code execution (eval/exec) from LLM output
     """
 
     detector_id = "LLM09"
@@ -87,16 +106,127 @@ class OverrelianceDetector(BaseDetector):
         'sql.execute', 'db.execute', 'cursor.execute'
     ]
 
+    # ==========================================================================
+    # ACTION EDGE PATTERNS - Required for HIGH/CRITICAL severity
+    # ==========================================================================
+
+    # HTTP/Network action edges
+    HTTP_ACTION_PATTERNS = [
+        r'requests\.(post|put|patch|delete)',
+        r'httpx\.(post|put|patch|delete)',
+        r'aiohttp.*\.(post|put|patch|delete)',
+        r'urllib\.request\.urlopen',
+        r'http\.client',
+    ]
+
+    # File action edges
+    FILE_ACTION_PATTERNS = [
+        r'\.write\s*\(',
+        r'open\s*\([^)]*["\']w',  # open(..., 'w')
+        r'shutil\.(copy|move|rmtree)',
+        r'os\.(remove|unlink|rmdir)',
+        r'pathlib.*\.write',
+    ]
+
+    # Database action edges
+    DB_ACTION_PATTERNS = [
+        r'\.execute\s*\(',
+        r'\.executemany\s*\(',
+        r'\.commit\s*\(',
+        r'session\.(add|delete|merge)',
+        r'bulk_(insert|update)',
+    ]
+
+    # Subprocess/command action edges
+    SUBPROCESS_ACTION_PATTERNS = [
+        r'subprocess\.(run|call|Popen|check_output)',
+        r'os\.(system|popen|exec)',
+        r'commands\.getoutput',
+    ]
+
+    # Code execution action edges (always CRITICAL)
+    CODE_EXEC_PATTERNS = [
+        r'\beval\s*\(',
+        r'\bexec\s*\(',
+        r'\bcompile\s*\(',
+    ]
+
     def _gather_potential_findings(self, parsed_data: Dict[str, Any]) -> List[Finding]:
-        """Gather all potential overreliance findings"""
+        """Gather all potential overreliance findings with action-edge-based severity."""
         findings = []
 
-        findings.extend(self._check_critical_decisions(parsed_data))
-        findings.extend(self._check_automated_actions(parsed_data))
-        findings.extend(self._check_missing_verification(parsed_data))
+        # Check for direct code execution (always CRITICAL if combined with LLM)
         findings.extend(self._check_direct_execution(parsed_data))
 
+        # Check critical decisions - demote to INFO unless action edge present
+        findings.extend(self._check_critical_decisions(parsed_data))
+
+        # Check automated actions - demote to INFO unless action edge present
+        findings.extend(self._check_automated_actions(parsed_data))
+
+        # Skip _check_missing_verification entirely - too many FPs, low value
+        # findings.extend(self._check_missing_verification(parsed_data))
+
         return findings
+
+    def _detect_action_edges(self, source_lines: List[str]) -> Dict[str, bool]:
+        """
+        Detect action edge patterns in source code.
+
+        Returns dict indicating which types of action edges are present:
+        - http: HTTP POST/PUT/DELETE/PATCH
+        - file: File writes/deletes
+        - db: Database modifications
+        - subprocess: Command execution
+        - code_exec: eval/exec/compile
+        """
+        source_code = '\n'.join(source_lines)
+
+        edges = {
+            'http': False,
+            'file': False,
+            'db': False,
+            'subprocess': False,
+            'code_exec': False,
+            'any': False,
+        }
+
+        # Check HTTP patterns
+        for pattern in self.HTTP_ACTION_PATTERNS:
+            if re.search(pattern, source_code, re.IGNORECASE):
+                edges['http'] = True
+                break
+
+        # Check file patterns
+        for pattern in self.FILE_ACTION_PATTERNS:
+            if re.search(pattern, source_code):
+                edges['file'] = True
+                break
+
+        # Check DB patterns
+        for pattern in self.DB_ACTION_PATTERNS:
+            if re.search(pattern, source_code, re.IGNORECASE):
+                edges['db'] = True
+                break
+
+        # Check subprocess patterns
+        for pattern in self.SUBPROCESS_ACTION_PATTERNS:
+            if re.search(pattern, source_code, re.IGNORECASE):
+                edges['subprocess'] = True
+                break
+
+        # Check code execution patterns
+        for pattern in self.CODE_EXEC_PATTERNS:
+            if re.search(pattern, source_code):
+                edges['code_exec'] = True
+                break
+
+        edges['any'] = any([
+            edges['http'], edges['file'], edges['db'],
+            edges['subprocess'], edges['code_exec']
+        ])
+
+        return edges
 
     def calculate_confidence(self, evidence: Dict[str, Any]) -> float:
         """Calculate confidence based on evidence"""
@@ -121,7 +251,14 @@ class OverrelianceDetector(BaseDetector):
         return min(max(confidence_scores), 1.0)
 
     def _check_critical_decisions(self, parsed_data: Dict[str, Any]) -> List[Finding]:
-        """Check for critical decisions without proper oversight"""
+        """Check for critical decisions without proper oversight.
+
+        Severity Strategy:
+        - INFO: Word pattern match but no action edge (advisory only)
+        - MEDIUM: Action edge present but with some safeguards
+        - HIGH: Action edge + no safeguards
+        - CRITICAL: Medical/financial + action edge + no safeguards
+        """
         findings = []
         functions = parsed_data.get('functions', [])
         source_lines = parsed_data.get('source_lines', [])
@@ -180,7 +317,25 @@ class OverrelianceDetector(BaseDetector):
 
             # Create finding if critical decision lacks proper safeguards
             if not has_oversight and not has_verification:
-                severity = Severity.CRITICAL if 'medical' in decision_types or 'financial' in decision_types else Severity.HIGH
+                # Detect action edges within this specific function
+                func_lines = source_lines[func_start-1:func_end]
+                action_edges = self._detect_action_edges(func_lines)
+
+                # Severity depends on action edges - advisory by default
+                is_high_stakes = 'medical' in decision_types or 'financial' in decision_types
+                has_any_safeguard = has_confidence_check or has_validation or has_disclaimer
+
+                if action_edges.get('any'):
+                    # Action edge present - this is actionable
+                    if is_high_stakes and not has_any_safeguard:
+                        severity = Severity.CRITICAL
+                    elif not has_any_safeguard:
+                        severity = Severity.HIGH
+                    else:
+                        severity = Severity.MEDIUM
+                else:
+                    # No action edge - demote to INFO (advisory only)
+                    severity = Severity.INFO
 
                 finding = Finding(
                     id=f"{self.detector_id}_{parsed_data.get('file_path', '')}_{func_start}_critical_decision",
@@ -191,7 +346,9 @@ class OverrelianceDetector(BaseDetector):
                     description=(
                         f"Function '{func.get('name')}' on line {func_start} makes critical {', '.join(decision_types)} "
                         f"decisions based on LLM output without human oversight or verification. "
-                        f"This creates risk of incorrect or harmful decisions being executed automatically."
+                        + (f"Action edges detected (HTTP/file/DB/subprocess) - risk of automated execution."
+                           if action_edges.get('any') else
+                           "No action edges detected - advisory only.")
                     ),
                     file_path=parsed_data.get('file_path', ''),
                     line_number=func_start,
@@ -205,7 +362,8 @@ class OverrelianceDetector(BaseDetector):
                         'has_verification': has_verification,
                         'has_confidence_check': has_confidence_check,
                         'has_validation': has_validation,
-                        'has_disclaimer': has_disclaimer
+                        'has_disclaimer': has_disclaimer,
+                        'action_edges': action_edges
                     }
                 )
                 findings.append(finding)
@@ -213,7 +371,13 @@ class OverrelianceDetector(BaseDetector):
         return findings
 
     def _check_automated_actions(self, parsed_data: Dict[str, Any]) -> List[Finding]:
-        """Check for automated actions without confidence thresholds"""
+        """Check for automated actions without confidence thresholds.
+
+        Severity Strategy:
+        - INFO: Word pattern match but no action edge (advisory only)
+        - MEDIUM: Action edge + some safeguards
+        - HIGH: Action edge + no safeguards
+        """
         findings = []
         functions = parsed_data.get('functions', [])
         source_lines = parsed_data.get('source_lines', [])
@@ -259,16 +423,28 @@ class OverrelianceDetector(BaseDetector):
 
             # Create finding if automated action lacks confidence checks
             if not has_confidence_check and not has_validation:
+                # Detect action edges within this specific function
+                func_lines = source_lines[func_start-1:func_end]
+                action_edges = self._detect_action_edges(func_lines)
+
+                # Severity depends on action edges - advisory by default
+                if action_edges.get('any'):
+                    severity = Severity.HIGH
+                else:
+                    severity = Severity.INFO
+
                 finding = Finding(
                     id=f"{self.detector_id}_{parsed_data.get('file_path', '')}_{func_start}_automated_action",
                     category=f"{self.detector_id}: {self.name}",
-                    severity=Severity.MEDIUM,
+                    severity=severity,
                     confidence=0.0,  # Will be set by BaseDetector
                     title=f"Automated action without confidence threshold in '{func.get('name')}'",
                     description=(
                         f"Function '{func.get('name')}' on line {func_start} automatically executes actions "
                         f"based on LLM output without checking confidence thresholds or validating output. "
-                        f"This may lead to executing incorrect or unreliable suggestions."
+                        + (f"Action edges detected - risk of automated execution."
+                           if action_edges.get('any') else
+                           "No action edges detected - advisory only.")
                     ),
                     file_path=parsed_data.get('file_path', ''),
                     line_number=func_start,
@@ -278,7 +454,8 @@ class OverrelianceDetector(BaseDetector):
                         'function_name': func.get('name'),
                         'is_automated_action': True,
                         'has_confidence_check': False,
-                        'has_validation': False
+                        'has_validation': False,
+                        'action_edges': action_edges
                     }
                 )
                 findings.append(finding)
@@ -352,7 +529,11 @@ class OverrelianceDetector(BaseDetector):
         return findings
 
     def _check_direct_execution(self, parsed_data: Dict[str, Any]) -> List[Finding]:
-        """Check for direct execution of LLM-generated code"""
+        """Check for direct execution of LLM-generated code.
+
+        NOTE: Direct code execution (eval/exec) is ALWAYS CRITICAL -
+        no advisory demotion here since eval/exec IS the action edge.
+        """
         findings = []
         functions = parsed_data.get('functions', [])
         source_lines = parsed_data.get('source_lines', [])
@@ -381,6 +562,7 @@ class OverrelianceDetector(BaseDetector):
             ]
 
             if execution_patterns_found:
+                # Direct execution is ALWAYS CRITICAL - no advisory demotion
                 finding = Finding(
                     id=f"{self.detector_id}_{parsed_data.get('file_path', '')}_{func_start}_direct_execution",
                     category=f"{self.detector_id}: {self.name}",
