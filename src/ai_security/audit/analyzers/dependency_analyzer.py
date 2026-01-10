@@ -5,7 +5,7 @@ Dependency Analyzer for detecting security-related packages.
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 
 @dataclass
@@ -375,7 +375,7 @@ class DependencyAnalyzer:
                 else:
                     self._dependencies[pkg_name] = dep_match
 
-    def _categorize_package(self, pkg_name: str) -> tuple[Optional[str], str]:
+    def _categorize_package(self, pkg_name: str) -> Tuple[Optional[str], str]:
         """Categorize a package by security function."""
         pkg_lower = pkg_name.lower().replace("-", "_").replace("_", "-")
 

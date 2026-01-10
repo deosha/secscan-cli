@@ -13,7 +13,7 @@ Scoring Logic:
 
 import logging
 from collections import Counter
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from ai_security.models.finding import Finding, Severity
 from ai_security.scorers.base_scorer import BaseScorer, CategoryScore
@@ -171,7 +171,7 @@ class OWASPScorer(BaseScorer):
     def _calculate_vulnerability_score(
         self,
         findings: List[Finding]
-    ) -> tuple[int, Dict[str, Any]]:
+    ) -> Tuple[int, Dict[str, Any]]:
         """
         Calculate score based on vulnerability findings
 
