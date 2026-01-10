@@ -122,6 +122,11 @@ def main():
     default=True,
     help="Reduce confidence for findings in test files (default: enabled)",
 )
+@click.option(
+    "-q", "--quiet",
+    is_flag=True,
+    help="Quiet mode: suppress banners and spinners, output only results (useful for CI/CD)",
+)
 def scan(
     path: str,
     output: str,
@@ -137,6 +142,7 @@ def scan(
     mode: Optional[str],
     exclude_tests: bool,
     demote_tests: bool,
+    quiet: bool,
 ):
     """
     Perform static code analysis for security vulnerabilities.
@@ -179,25 +185,29 @@ def scan(
 
     # Validate path - must be a valid local path OR a remote URL
     if not is_remote_url(path) and not Path(path).exists():
-        console.print(f"[red]Error:[/red] Path does not exist: {path}")
-        console.print("\n[dim]For remote repositories, use a full URL:[/dim]")
-        console.print("  - https://github.com/user/repo")
-        console.print("  - https://gitlab.com/user/repo")
-        console.print("  - https://bitbucket.org/user/repo")
+        if not quiet:
+            console.print(f"[red]Error:[/red] Path does not exist: {path}")
+            console.print("\n[dim]For remote repositories, use a full URL:[/dim]")
+            console.print("  - https://github.com/user/repo")
+            console.print("  - https://gitlab.com/user/repo")
+            console.print("  - https://bitbucket.org/user/repo")
+        else:
+            print(f"Error: Path does not exist: {path}", file=sys.stderr)
         sys.exit(1)
 
-    # Show appropriate panel
-    if is_remote_url(path):
-        console.print(Panel.fit(
-            "[bold blue]aisentry[/bold blue] - Remote Repository Scan",
-            border_style="blue",
-        ))
-        console.print(f"\n[cyan]Repository:[/cyan] {path}")
-    else:
-        console.print(Panel.fit(
-            "[bold blue]aisentry[/bold blue] - Static Code Analysis",
-            border_style="blue",
-        ))
+    # Show appropriate panel (unless quiet mode)
+    if not quiet:
+        if is_remote_url(path):
+            console.print(Panel.fit(
+                "[bold blue]aisentry[/bold blue] - Remote Repository Scan",
+                border_style="blue",
+            ))
+            console.print(f"\n[cyan]Repository:[/cyan] {path}")
+        else:
+            console.print(Panel.fit(
+                "[bold blue]aisentry[/bold blue] - Static Code Analysis",
+                border_style="blue",
+            ))
 
     # Convert categories tuple to list
     categories = list(category) if category else None
@@ -231,32 +241,44 @@ def scan(
         config=scan_config,
     )
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        if is_remote_url(path):
-            task = progress.add_task("Cloning repository...", total=None)
-        else:
-            task = progress.add_task("Scanning...", total=None)
-
-        try:
+    # Run scan with or without progress spinner
+    try:
+        if quiet:
             result = scanner.scan(path)
-            progress.update(task, description="Scan complete!")
-        except FileNotFoundError as e:
+        else:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                if is_remote_url(path):
+                    task = progress.add_task("Cloning repository...", total=None)
+                else:
+                    task = progress.add_task("Scanning...", total=None)
+                result = scanner.scan(path)
+                progress.update(task, description="Scan complete!")
+    except FileNotFoundError as e:
+        if quiet:
+            print(f"Error: {e}", file=sys.stderr)
+        else:
             console.print(f"[red]Error:[/red] {e}")
-            sys.exit(1)
-        except RuntimeError as e:
+        sys.exit(1)
+    except RuntimeError as e:
+        if quiet:
+            print(f"Error: {e}", file=sys.stderr)
+        else:
             console.print(f"[red]Error:[/red] {e}")
             console.print("\n[dim]Make sure git is installed and the repository URL is correct.[/dim]")
-            sys.exit(1)
-        except Exception as e:
+        sys.exit(1)
+    except Exception as e:
+        if quiet:
+            print(f"Error during scan: {e}", file=sys.stderr)
+        else:
             console.print(f"[red]Error during scan:[/red] {e}")
-            if verbose:
-                import traceback
-                traceback.print_exc()
-            sys.exit(1)
+        if verbose:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
 
     # Filter by severity
     severity_order = ["critical", "high", "medium", "low", "info"]
@@ -276,39 +298,45 @@ def scan(
             from aisentry.audit import AuditEngine
             from aisentry.core.scanner import clone_repository
 
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
-            ) as progress:
-                task = progress.add_task("Running security audit...", total=None)
-
+            def run_audit():
+                nonlocal audit_result
                 # Determine audit path
                 if is_remote_url(path):
-                    # Clone repo again for audit (scanner may have cleaned up)
                     temp_dir, success = clone_repository(path)
                     if success:
                         audit_path = Path(temp_dir)
                     else:
                         audit_path = None
-                        temp_dir = None
+                        temp_dir_local = None
                 else:
                     audit_path = Path(path)
-                    temp_dir = None
+                    temp_dir_local = None
 
                 if audit_path and audit_path.exists():
                     audit_engine = AuditEngine(verbose=verbose)
                     audit_result = audit_engine.run(audit_path)
-                    progress.update(task, description="Audit complete!")
 
                 # Cleanup temp directory
-                if temp_dir:
+                if is_remote_url(path) and 'temp_dir' in dir() and temp_dir:
                     shutil.rmtree(temp_dir, ignore_errors=True)
+
+            if quiet:
+                run_audit()
+            else:
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    console=console,
+                ) as progress:
+                    task = progress.add_task("Running security audit...", total=None)
+                    run_audit()
+                    progress.update(task, description="Audit complete!")
+
         except ImportError:
-            if verbose:
+            if verbose and not quiet:
                 console.print("[dim]Audit module not available, skipping security posture audit[/dim]")
         except Exception as e:
-            if verbose:
+            if verbose and not quiet:
                 console.print(f"[dim]Audit failed: {e}[/dim]")
 
     # Generate output
@@ -326,16 +354,22 @@ def scan(
         reporter = SARIFReporter(verbose=verbose)
         report = reporter.generate_scan_report(result)
     else:
-        # Text output using rich
-        _print_scan_results(result)
+        # Text output using rich (skip if quiet)
+        if not quiet:
+            _print_scan_results(result)
         report = None
 
     # Save or print report
     if output_file and report:
         Path(output_file).write_text(report, encoding="utf-8")
-        console.print(f"\n[green]Report saved to:[/green] {output_file}")
+        if not quiet:
+            console.print(f"\n[green]Report saved to:[/green] {output_file}")
     elif report:
-        console.print(report)
+        # In quiet mode, print raw report; otherwise use Rich console
+        if quiet:
+            print(report)
+        else:
+            console.print(report)
 
 
 @main.command()

@@ -98,8 +98,11 @@ class LLM99NewCategoryDetector(BaseDetector):
 ## Improving Detection Accuracy
 
 We track precision and recall against a ground truth testbed. Current metrics:
-- **Precision**: 20% (target: 50%+)
-- **Recall**: 57.8%
+- **Precision**: 74.5%
+- **Recall**: 52.1%
+- **F1 Score**: 61.3%
+
+See [llm-sec-eval](https://github.com/deosha/llm-sec-eval) for full evaluation methodology.
 
 ### Reducing False Positives
 
